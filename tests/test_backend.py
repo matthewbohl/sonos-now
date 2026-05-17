@@ -310,6 +310,43 @@ def test_groups_expand_by_default_but_respect_explicit_collapse():
     assert app._visible_entries() == [group]
 
 
+def test_optimistic_group_snapshot_is_preserved_until_sonos_reports_it():
+    import time
+
+    from sonos_now.app import OPTIMISTIC_GROUP_TTL_SECONDS, SonosNowApp
+    from sonos_now.models import SonosSnapshot
+
+    app = SonosNowApp(SonosService())
+    kitchen = SpeakerEntry("Kitchen", speaker="Kitchen", members=("Kitchen",), coordinator="Kitchen")
+    office = SpeakerEntry("Office", speaker="Office", members=("Office",), coordinator="Office")
+    group = SpeakerEntry("Kitchen + Office Duet", is_group=True, members=("Kitchen", "Office"), coordinator="Kitchen")
+
+    app._optimistic_groups[("Kitchen", "Office")] = time.monotonic() + OPTIMISTIC_GROUP_TTL_SECONDS
+
+    stale_snapshot = SonosSnapshot(entries=(kitchen, office), tracks=())
+    assert app._should_defer_snapshot_for_optimistic_groups(stale_snapshot)
+
+    observed_snapshot = SonosSnapshot(entries=(group, kitchen, office), tracks=())
+    assert not app._should_defer_snapshot_for_optimistic_groups(observed_snapshot)
+    assert not app._optimistic_groups
+
+
+def test_research_lines_show_ranked_genres_and_artist_column():
+    from sonos_now.app import _research_lines
+    from sonos_now.everynoise import GenreResult
+
+    results = (
+        GenreResult("art rock", 122.4, "Radiohead", "artist-id", rank=3, artists=("Thom Yorke", "Atoms for Peace")),
+        GenreResult("alternative rock", 110.1, "Radiohead", "artist-id", rank=8, artists=("The Smile",)),
+    )
+
+    lines = _research_lines("Radiohead", results, 0, 0, False)
+
+    assert "Every Noise Research: Radiohead" in lines[0]
+    assert "art rock" in "\n".join(lines)
+    assert "Thom Yorke" in "\n".join(lines)
+
+
 def test_visualizer_engines_and_secret_scene_render_nonblank_frames():
     from sonos_now.visualizer import ENGINES, _secret_festival
 

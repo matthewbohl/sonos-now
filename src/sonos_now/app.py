@@ -12,7 +12,7 @@ from textual.widgets import Header, Static
 from rich.text import Text
 
 from .ascii_art import AlbumArt, fetch_image_bytes, image_bytes_to_colored_ascii
-from .everynoise import EveryNoiseClient
+from .everynoise import EveryNoiseClient, GenreResult
 from .models import SonosSnapshot, SpeakerEntry, TrackInfo
 from .progress import progress_bar
 from .soco_backend import SonosService
@@ -21,6 +21,7 @@ from .visualizer import VisualizerScreen
 
 ART_STYLES = ("black", "red", "green", "yellow", "blue", "magenta", "cyan", "white")
 SPINNER_CHARS = "|/\\-o%"
+OPTIMISTIC_GROUP_TTL_SECONDS = 8.0
 
 
 @dataclass
@@ -87,10 +88,24 @@ class SonosNowApp(App[None]):
         background: $background 70%;
     }
 
+    ResearchScreen {
+        align: center middle;
+        background: $background 70%;
+    }
+
     #help-modal {
         width: 68;
         height: auto;
         border: thick cyan;
+        background: black;
+        color: white;
+        padding: 1 2;
+    }
+
+    #research-modal {
+        width: 92;
+        height: 34;
+        border: thick magenta;
         background: black;
         color: white;
         padding: 1 2;
@@ -145,6 +160,7 @@ class SonosNowApp(App[None]):
         self._spinner_index = 0
         self._command_cooldown_until = 0.0
         self._pending_expand_members: set[tuple[str, ...]] = set()
+        self._optimistic_groups: dict[tuple[str, ...], float] = {}
         self.debug_events: list[DebugEvent] = []
         self.debug_visible = False
         self.debug_scroll = 0
@@ -188,7 +204,10 @@ class SonosNowApp(App[None]):
         elif char in {"V", "v"}:
             event.stop()
             self.action_visualizer()
-        elif char in {"R", "r"}:
+        elif char == "R":
+            event.stop()
+            self.action_research_artist()
+        elif char == "r":
             event.stop()
             await self.action_refresh()
         elif char in {"H", "h"}:
@@ -328,11 +347,14 @@ class SonosNowApp(App[None]):
         previous_expanded_groups = set(self.expanded_groups)
         previous_collapsed_groups = set(self.collapsed_groups)
         previous_selected_index = self.selected_index
+        optimistic_key = tuple(sorted(speakers))
+        self._optimistic_groups[optimistic_key] = time.monotonic() + OPTIMISTIC_GROUP_TTL_SECONDS
         self._apply_optimistic_group(source, tuple(speakers))
         try:
             await asyncio.to_thread(self.service.group_speakers, source, tuple(speakers))
         except Exception as exc:
             self._debug_finish(debug_event, "failed", str(exc))
+            self._optimistic_groups.pop(optimistic_key, None)
             self.entries = previous_entries
             self.tracks = previous_tracks
             self.expanded_groups = previous_expanded_groups
@@ -456,6 +478,17 @@ class SonosNowApp(App[None]):
     def action_visualizer(self) -> None:
         self.push_screen(VisualizerScreen())
 
+    def action_research_artist(self) -> None:
+        artist = next(
+            (track.artist.strip() for _label, track, _volumes in self._detail_items() if track.artist.strip() and not track.error),
+            "",
+        )
+        if not artist:
+            self._set_status("No artist available for Every Noise research")
+            return
+        self._set_status(f"Researching {artist} on Every Noise")
+        self.push_screen(ResearchScreen(self.every_noise, artist))
+
     async def _run_control(self, label: str, func) -> None:
         if self.view_only:
             self._set_status("View-only mode: controls disabled")
@@ -483,6 +516,10 @@ class SonosNowApp(App[None]):
             self._end_busy()
 
     def _apply_snapshot(self, snapshot: SonosSnapshot) -> None:
+        if self._should_defer_snapshot_for_optimistic_groups(snapshot):
+            self._render_debug()
+            return
+
         selected_key = self._selected_entry().key if self._selected_entry() else ""
         self.entries = list(snapshot.entries)
         self.tracks = list(snapshot.tracks)
@@ -520,6 +557,19 @@ class SonosNowApp(App[None]):
                 self._prefetch_similar_artists()
             except ScreenStackError:
                 pass
+
+    def _should_defer_snapshot_for_optimistic_groups(self, snapshot: SonosSnapshot) -> bool:
+        if not self._optimistic_groups:
+            return False
+
+        now = time.monotonic()
+        visible_groups = {tuple(sorted(entry.members)) for entry in snapshot.entries if entry.is_group}
+        self._optimistic_groups = {
+            members: expires_at
+            for members, expires_at in self._optimistic_groups.items()
+            if expires_at > now and members not in visible_groups
+        }
+        return bool(self._optimistic_groups)
 
     def _apply_optimistic_group(self, source: str, speakers: tuple[str, ...]) -> None:
         members = tuple(dict.fromkeys(speakers))
@@ -904,6 +954,7 @@ class HelpScreen(ModalScreen[None]):
                     "  i              Volume up",
                     "  k              Volume down",
                     "  r              Refresh now",
+                    "  R              Every Noise artist research",
                     "",
                     "Grouping",
                     "  1-9            Tag highlighted speaker for grouping",
@@ -926,6 +977,80 @@ class HelpScreen(ModalScreen[None]):
         if event.key in {"escape", "enter", "space"} or (getattr(event, "character", "") or "") in {"h", "H"}:
             event.stop()
             self.dismiss()
+
+
+class ResearchScreen(ModalScreen[None]):
+    def __init__(self, client: EveryNoiseClient, artist: str) -> None:
+        super().__init__()
+        self.client = client
+        self.artist = artist
+        self.results: tuple[GenreResult, ...] = ()
+        self.selected_index = 0
+        self.artist_scroll = 0
+        self.focus_artists = False
+        self.loading = True
+        self.error = ""
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="research-modal")
+
+    def on_mount(self) -> None:
+        self._render()
+        self.run_worker(self._load(), exclusive=True)
+
+    async def _load(self) -> None:
+        try:
+            self.results = await asyncio.to_thread(self.client.search_artist_genres, self.artist, 10)
+        except Exception as exc:
+            self.error = str(exc)
+        finally:
+            self.loading = False
+        self._render()
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            event.stop()
+            self.dismiss()
+        elif event.key == "enter":
+            event.stop()
+            self.focus_artists = not self.focus_artists
+            self._render()
+        elif event.key == "up":
+            event.stop()
+            if self.focus_artists:
+                self.artist_scroll = max(0, self.artist_scroll - 1)
+            else:
+                self.selected_index = max(0, self.selected_index - 1)
+                self.artist_scroll = 0
+            self._render()
+        elif event.key == "down":
+            event.stop()
+            if self.focus_artists:
+                self.artist_scroll += 1
+            else:
+                self.selected_index = min(max(0, len(self.results) - 1), self.selected_index + 1)
+                self.artist_scroll = 0
+            self._render()
+        elif event.key == "space":
+            event.stop()
+            self.dismiss()
+
+    def _render(self) -> None:
+        if not self.is_mounted:
+            return
+        self.query_one("#research-modal", Static).update(
+            "\n".join(
+                _research_lines(
+                    self.artist,
+                    self.results,
+                    self.selected_index,
+                    self.artist_scroll,
+                    self.focus_artists,
+                    loading=self.loading,
+                    error=self.error,
+                )
+            )
+        )
 
 
 def _track_text(label: str, track: TrackInfo, volumes: tuple[tuple[str, int], ...]) -> str:
@@ -971,6 +1096,67 @@ def _album_art_text(album_art: AlbumArt) -> Text:
     if width:
         text.append("+" + "-" * width + "+", style="cyan on black")
     return text
+
+
+def _research_lines(
+    artist: str,
+    results: tuple[GenreResult, ...],
+    selected_index: int,
+    artist_scroll: int,
+    focus_artists: bool,
+    *,
+    loading: bool = False,
+    error: str = "",
+) -> list[str]:
+    lines = [
+        f"[ Every Noise Research: {artist} ]",
+        "",
+    ]
+    if loading:
+        return [*lines, "Searching Every Noise and cached Spotify metadata..."]
+    if error:
+        return [*lines, f"Research failed: {error}", "", "Esc closes this window."]
+    if not results:
+        return [*lines, "No genre matches found.", "", "Esc closes this window."]
+
+    selected_index = min(max(0, selected_index), len(results) - 1)
+    selected = results[selected_index]
+    genre_header = "Genres by match" + (" [active]" if not focus_artists else "")
+    artist_header = "Artists in selected genre" + (" [active]" if focus_artists else "")
+    lines.append(f"{genre_header:<42} {artist_header}")
+    lines.append(f"{'-' * 40} {'-' * 43}")
+
+    artists = selected.artists
+    max_artist_scroll = max(0, len(artists) - 20)
+    artist_scroll = min(max(0, artist_scroll), max_artist_scroll)
+    visible_artists = artists[artist_scroll : artist_scroll + 20]
+    row_count = max(10, min(20, max(len(results), len(visible_artists))))
+    for index in range(row_count):
+        if index < len(results):
+            result = results[index]
+            pointer = ">" if index == selected_index and not focus_artists else " "
+            rank = f"#{result.rank}" if result.rank is not None else "--"
+            genre = _ellipsize(result.genre, 22)
+            match = min(999, int(result.score))
+            genre_line = f"{pointer} {genre:<22} {match:>3} {rank:<5}"
+        else:
+            genre_line = ""
+
+        if index < len(visible_artists):
+            artist_pointer = ">" if focus_artists and index == 0 else " "
+            artist_line = f"{artist_pointer} {_ellipsize(visible_artists[index], 39)}"
+        else:
+            artist_line = ""
+        lines.append(f"{genre_line:<42} {artist_line}")
+
+    lines.extend(
+        [
+            "",
+            f"Selected: {selected.genre} via {selected.matched_artist}",
+            "Up/Down moves through genres or artists. Enter switches column. Esc/Space closes.",
+        ]
+    )
+    return lines
 
 
 def _volume_text(volumes: tuple[tuple[str, int], ...], track: TrackInfo) -> str:
@@ -1085,4 +1271,3 @@ def _expand_existing_group_members(speakers: tuple[str, ...], entries: list[Spea
         if speaker not in output:
             output.append(speaker)
     return tuple(output)
-

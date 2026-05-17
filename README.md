@@ -83,6 +83,7 @@ sonos-now --subnets 192.168.1.0/24 192.168.20.0/24
 - `i`: volume up
 - `k`: volume down
 - `r`: refresh
+- `R`: Every Noise artist and genre research
 - `v`: fullscreen visualizer
 - `h`: show help
 - `d`: show/hide the SoCo debug pane
@@ -110,7 +111,7 @@ The project is intentionally split into small pieces:
 - `visualizer.py`: fullscreen Textual visualizer engines and palettes
 - `models.py`: plain dataclasses shared by UI and backend
 - `ascii_art.py`: colorized album-art conversion
-- `everynoise.py`: lazy similar-artist suggestions with local caching
+- `everynoise.py`: lazy similar-artist suggestions and artist genre research with local caching
 - `timefmt.py` / `progress.py`: small formatting helpers
 
 See [AGENTS.md](AGENTS.md) and [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for handoff notes for future maintainers and AI coding agents.

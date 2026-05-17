@@ -89,7 +89,7 @@ sonos-now --subnets 192.168.1.0/24 192.168.20.0/24
 - `o` / `l`: scroll the debug pane up/down when visible
 - `q`: quit
 
-Inside the visualizer, left/right cycles through dedicated Textual visualizer engines, `S` toggles the hidden festival scene, and any other key returns.
+Inside the visualizer, left/right cycles through dedicated Textual visualizer engines, and any other key returns.
 
 ## Grouped Speakers
 
@@ -107,7 +107,7 @@ The project is intentionally split into small pieces:
 
 - `soco_backend.py`: direct SoCo discovery, grouping, metadata, volume, and controls
 - `app.py`: Textual UI, keyboard bindings, and album-art rendering
-- `visualizer.py`: fullscreen Textual visualizer engines, palettes, and the hidden festival scene
+- `visualizer.py`: fullscreen Textual visualizer engines and palettes
 - `models.py`: plain dataclasses shared by UI and backend
 - `ascii_art.py`: colorized album-art conversion
 - `everynoise.py`: lazy similar-artist suggestions with local caching

@@ -1550,7 +1550,7 @@ def _speaker_state_indicator(entry: SpeakerEntry, entries: list[SpeakerEntry], t
     if not entry.is_group and _is_group_member(entry, entries):
         return ""
     track = _shared_track_for_group(entry, track_by_speaker) if entry.is_group else track_by_speaker.get(entry.speaker or "")
-    return f" [{_playback_state_symbol(track)}]"
+    return f" ({_playback_state_symbol(track)})"
 
 
 def _playback_state_symbol(track: TrackInfo | None) -> str:

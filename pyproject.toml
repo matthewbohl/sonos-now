@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sonos-now"
+version = "0.1.0"
+description = "Sonos Now: a Textual terminal dashboard for Sonos speakers using SoCo directly."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Matthew Bohl", email = "matthewbohl@gmail.com" }]
+dependencies = [
+  "Pillow>=10.0",
+  "requests>=2.31",
+  "soco>=0.31.0",
+  "textual>=0.89.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/matthewbohl/sonos-now"
+Repository = "https://github.com/matthewbohl/sonos-now"
+Issues = "https://github.com/matthewbohl/sonos-now/issues"
+
+[project.scripts]
+sonos-now = "sonos_now.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sonos_now"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/tests",
+  "/docs",
+  "/AGENTS.md",
+  "/LICENSE",
+  "/README.md",
+  "/pyproject.toml",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

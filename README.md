@@ -82,6 +82,7 @@ sonos-now --subnets 192.168.1.0/24 192.168.20.0/24
 - `b`: previous track
 - `i`: volume up
 - `k`: volume down
+- `A`: fullscreen album art for the highlighted speaker or group
 - `r`: refresh
 - `R`: show/hide Every Noise artist and genre research in the Now Playing pane
 - `v`: fullscreen visualizer

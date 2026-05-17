@@ -386,6 +386,42 @@ def test_side_by_side_album_art_keeps_art_to_right_of_metadata():
     assert "|@@|" in lines[1]
 
 
+def test_fullscreen_art_helpers_size_and_muted_fallback():
+    from sonos_now.app import MIN_FULLSCREEN_ART_SIZE, _fullscreen_art_size, _muted_speaker_lines
+
+    width, height = _fullscreen_art_size(100, 40)
+    assert width >= MIN_FULLSCREEN_ART_SIZE[0]
+    assert height >= MIN_FULLSCREEN_ART_SIZE[1]
+    assert width <= 96
+    assert width >= height
+
+    muted = "\n".join(_muted_speaker_lines(40, 18))
+    assert "/" in muted
+    assert "O" in muted
+    assert "#" in muted
+
+
+def test_fullscreen_album_art_uses_highlighted_entry_not_marked_entries():
+    from sonos_now.app import SonosNowApp
+    from sonos_now.models import TrackInfo
+
+    app = SonosNowApp(SonosService())
+    kitchen = SpeakerEntry("Kitchen", speaker="Kitchen", members=("Kitchen",), coordinator="Kitchen")
+    office = SpeakerEntry("Office", speaker="Office", members=("Office",), coordinator="Office")
+    app.entries = [kitchen, office]
+    app.tracks = [
+        TrackInfo(speaker="Kitchen", title="Kitchen Song", album_art_url="http://example/kitchen.jpg"),
+        TrackInfo(speaker="Office", title="Office Song", album_art_url="http://example/office.jpg"),
+    ]
+    app.marked.add(kitchen.key)
+    app.selected_index = 1
+
+    item = app._selected_detail_item()
+
+    assert item is not None
+    assert item[1].title == "Office Song"
+
+
 def test_visualizer_engines_and_secret_scene_render_nonblank_frames():
     from sonos_now.visualizer import ENGINES, _secret_festival
 

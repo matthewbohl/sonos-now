@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from textual.app import App, ComposeResult, ScreenStackError
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.screen import ModalScreen
+from textual.screen import ModalScreen, Screen
 from textual.widgets import Header, Static
 from rich.text import Text
 
@@ -25,6 +25,7 @@ OPTIMISTIC_GROUP_TTL_SECONDS = 8.0
 FULL_ALBUM_ART_SIZE = (56, 24)
 COMPACT_ALBUM_ART_SIZE = (28, 12)
 SIDE_BY_SIDE_METADATA_WIDTH = 44
+MIN_FULLSCREEN_ART_SIZE = (32, 12)
 
 
 @dataclass
@@ -148,6 +149,7 @@ class SonosNowApp(App[None]):
         self.selected_index = 0
         self.album_art: dict[str, AlbumArt] = {}
         self.compact_album_art: dict[str, AlbumArt] = {}
+        self.fullscreen_album_art: dict[tuple[str, int, int], AlbumArt] = {}
         self.album_art_bytes: dict[str, bytes] = {}
         self.album_art_jobs: set[tuple[str, str]] = set()
         self.album_art_locks: dict[str, asyncio.Lock] = {}
@@ -217,6 +219,9 @@ class SonosNowApp(App[None]):
         elif char in {"V", "v"}:
             event.stop()
             self.action_visualizer()
+        elif char in {"A", "a"}:
+            event.stop()
+            self.action_fullscreen_album_art()
         elif char == "R":
             event.stop()
             self.action_research_artist()
@@ -533,6 +538,17 @@ class SonosNowApp(App[None]):
 
     def action_visualizer(self) -> None:
         self.push_screen(VisualizerScreen())
+
+    def action_fullscreen_album_art(self) -> None:
+        item = self._selected_detail_item()
+        if not item:
+            self.push_screen(FullscreenAlbumArtScreen("No speaker selected"))
+            return
+        label, track, _volumes = item
+        if track.error or not track.album_art_url:
+            self.push_screen(FullscreenAlbumArtScreen(label))
+            return
+        self.push_screen(FullscreenAlbumArtScreen(label, track, self.album_art_bytes, self.fullscreen_album_art))
 
     def action_research_artist(self) -> None:
         artist = next(
@@ -915,20 +931,33 @@ class SonosNowApp(App[None]):
         return [entry] if entry else []
 
     def _detail_items(self) -> list[tuple[str, TrackInfo, tuple[tuple[str, int], ...]]]:
-        track_by_speaker = {track.speaker: track for track in self.tracks}
         entries = self._control_entries()
         items: list[tuple[str, TrackInfo, tuple[tuple[str, int], ...]]] = []
         covered: set[str] = set()
         for entry in entries:
-            if entry.is_group:
-                track = _shared_track_for_group(entry, track_by_speaker)
-                if track:
-                    items.append((", ".join(entry.members), track, _volumes_for(entry.members, track_by_speaker)))
-                    covered.update(entry.members)
-            elif entry.speaker and entry.speaker not in covered:
-                track = track_by_speaker.get(entry.speaker, TrackInfo(speaker=entry.speaker, error="Waiting for refresh"))
-                items.append((entry.label.strip(), track, _volumes_for((entry.speaker,), track_by_speaker)))
+            item = self._detail_item_for_entry(entry)
+            if item and not set(_entry_speakers(entry)).intersection(covered):
+                items.append(item)
+                covered.update(_entry_speakers(entry))
         return items
+
+    def _selected_detail_item(self) -> tuple[str, TrackInfo, tuple[tuple[str, int], ...]] | None:
+        entry = self._selected_entry()
+        return self._detail_item_for_entry(entry) if entry else None
+
+    def _detail_item_for_entry(self, entry: SpeakerEntry | None) -> tuple[str, TrackInfo, tuple[tuple[str, int], ...]] | None:
+        if entry is None:
+            return None
+        track_by_speaker = {track.speaker: track for track in self.tracks}
+        if entry.is_group:
+            track = _shared_track_for_group(entry, track_by_speaker)
+            if track:
+                return ", ".join(entry.members), track, _volumes_for(entry.members, track_by_speaker)
+            return None
+        if entry.speaker:
+            track = track_by_speaker.get(entry.speaker, TrackInfo(speaker=entry.speaker, error="Waiting for refresh"))
+            return entry.label.strip(), track, _volumes_for((entry.speaker,), track_by_speaker)
+        return None
 
     def _set_status(self, message: str) -> None:
         self.message = message
@@ -1117,6 +1146,7 @@ class HelpScreen(ModalScreen[None]):
                     "  b              Previous track",
                     "  i              Volume up",
                     "  k              Volume down",
+                    "  A              Fullscreen album art for highlighted row",
                     "  r              Refresh now",
                     "  R              Every Noise artist research",
                     "",
@@ -1141,6 +1171,92 @@ class HelpScreen(ModalScreen[None]):
         if event.key in {"escape", "enter", "space"} or (getattr(event, "character", "") or "") in {"h", "H"}:
             event.stop()
             self.dismiss()
+
+
+class FullscreenAlbumArtScreen(Screen[None]):
+    CSS = """
+    FullscreenAlbumArtScreen {
+        background: black;
+    }
+
+    #fullscreen-art {
+        height: 1fr;
+        background: black;
+        color: white;
+    }
+    """
+
+    def __init__(
+        self,
+        label: str,
+        track: TrackInfo | None = None,
+        image_cache: dict[str, bytes] | None = None,
+        art_cache: dict[tuple[str, int, int], AlbumArt] | None = None,
+    ) -> None:
+        super().__init__()
+        self.label = label
+        self.track = track
+        self.image_cache = image_cache if image_cache is not None else {}
+        self.art_cache = art_cache if art_cache is not None else {}
+        self.error = ""
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="fullscreen-art")
+
+    def on_mount(self) -> None:
+        self._render_loading_or_fallback()
+        if self.track and self.track.album_art_url:
+            self.run_worker(self._load(), exclusive=True)
+
+    def on_resize(self) -> None:
+        if self.track and self.track.album_art_url:
+            self.run_worker(self._load(), exclusive=True)
+        else:
+            self._render_loading_or_fallback()
+
+    def on_key(self, event) -> None:
+        event.stop()
+        self.dismiss()
+
+    async def _load(self) -> None:
+        if not self.track:
+            self._render_loading_or_fallback()
+            return
+        signature = _track_signature(self.track)
+        width, height = _fullscreen_art_size(self.size.width, self.size.height)
+        cache_key = (signature, width, height)
+        art = self.art_cache.get(cache_key)
+        if art is None:
+            try:
+                image = self.image_cache.get(signature)
+                if image is None:
+                    image = await asyncio.to_thread(fetch_image_bytes, self.track.album_art_url, 5.0)
+                    self.image_cache[signature] = image
+                lines, colors = await asyncio.to_thread(image_bytes_to_colored_ascii, image, width, height)
+                art = AlbumArt(signature=signature, lines=lines, colors=colors)
+                self.art_cache[cache_key] = art
+            except Exception as exc:
+                self.error = str(exc)
+                self._render_loading_or_fallback()
+                return
+        self._render_art(art)
+
+    def _render_loading_or_fallback(self) -> None:
+        if not self.is_mounted:
+            return
+        title = _fullscreen_art_title(self.label, self.track)
+        if self.track and self.track.album_art_url and not self.error:
+            text = Text(f"\n{title.center(max(1, self.size.width))}\n\nLoading album art...", style="white on black")
+        else:
+            text = _muted_speaker_text(title, self.size.width, self.size.height, self.error)
+        self.query_one("#fullscreen-art", Static).update(text)
+
+    def _render_art(self, art: AlbumArt) -> None:
+        if not self.is_mounted:
+            return
+        title = _fullscreen_art_title(self.label, self.track)
+        text = _fullscreen_album_art_text(title, art, self.size.width)
+        self.query_one("#fullscreen-art", Static).update(text)
 
 
 def _track_text(label: str, track: TrackInfo, volumes: tuple[tuple[str, int], ...]) -> str:
@@ -1212,6 +1328,89 @@ def _album_art_rows(album_art: AlbumArt) -> list[Text]:
     if width:
         rows.append(Text("+" + "-" * width + "+", style="cyan on black"))
     return rows
+
+
+def _fullscreen_album_art_text(title: str, album_art: AlbumArt, screen_width: int) -> Text:
+    width = max(1, screen_width)
+    text = Text(title.center(width), style="bold white on black")
+    text.append("\n")
+    for row in _album_art_rows(album_art):
+        pad = max(0, (width - len(row.plain)) // 2)
+        text.append(" " * pad)
+        text.append_text(row)
+        text.append("\n")
+    text.append(" any key returns ".center(width), style="bold cyan on black")
+    return text
+
+
+def _fullscreen_art_title(label: str, track: TrackInfo | None) -> str:
+    if track and not track.error:
+        parts = [part for part in (track.title.strip(), track.artist.strip(), track.album.strip()) if part]
+        if parts:
+            return f" {label}: {' - '.join(parts[:3])} "
+    return f" {label}: no active album art "
+
+
+def _fullscreen_art_size(screen_width: int, screen_height: int) -> tuple[int, int]:
+    available_width = max(MIN_FULLSCREEN_ART_SIZE[0], screen_width - 4)
+    available_height = max(MIN_FULLSCREEN_ART_SIZE[1], screen_height - 4)
+    height = min(available_height, max(MIN_FULLSCREEN_ART_SIZE[1], available_width // 2))
+    width = min(available_width, max(MIN_FULLSCREEN_ART_SIZE[0], height * 2))
+    return width, height
+
+
+def _muted_speaker_text(title: str, screen_width: int, screen_height: int, error: str = "") -> Text:
+    width = max(1, screen_width)
+    art_width, art_height = _fullscreen_art_size(screen_width, screen_height)
+    speaker_lines = _muted_speaker_lines(art_width, art_height)
+    text = Text(title.center(width), style="bold white on black")
+    text.append("\n")
+    for line in speaker_lines:
+        text.append(line.center(width), style="bold red on black")
+        text.append("\n")
+    message = "No active album art"
+    if error:
+        message = f"Album art unavailable: {_ellipsize(error, max(16, width - 4))}"
+    text.append(message.center(width), style="bold yellow on black")
+    text.append("\n")
+    text.append(" any key returns ".center(width), style="bold cyan on black")
+    return text
+
+
+def _muted_speaker_lines(width: int, height: int) -> tuple[str, ...]:
+    width = max(24, width)
+    height = max(12, height)
+    rows = [[" " for _ in range(width)] for _ in range(height)]
+    center_x = (width - 1) / 2.0
+    center_y = (height - 1) / 2.0
+    radius = min(width / 2.4, height / 2.1)
+
+    for row in range(height):
+        for col in range(width):
+            dx = col - center_x
+            dy = (row - center_y) * 2.0
+            distance = (dx * dx + dy * dy) ** 0.5
+            if abs(distance - radius) < 1.0:
+                rows[row][col] = "O"
+            slash_col = int(center_x + (center_y - row) * (width / max(1, height)) * 0.9)
+            if abs(col - slash_col) <= 1:
+                rows[row][col] = "/"
+
+    box_left = max(1, int(width * 0.28))
+    box_right = max(box_left + 3, int(width * 0.40))
+    box_top = max(1, int(height * 0.38))
+    box_bottom = min(height - 2, int(height * 0.62))
+    cone_tip = min(width - 2, int(width * 0.66))
+    mid = (box_top + box_bottom) // 2
+    for row in range(box_top, box_bottom + 1):
+        for col in range(box_left, box_right + 1):
+            rows[row][col] = "#"
+        spread = abs(row - mid)
+        for col in range(box_right + 1, max(box_right + 2, cone_tip - spread * 2)):
+            if 0 <= col < width:
+                rows[row][col] = "#"
+
+    return tuple("".join(row).rstrip() for row in rows)
 
 
 def _research_lines(

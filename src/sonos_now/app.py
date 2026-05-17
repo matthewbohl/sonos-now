@@ -88,11 +88,6 @@ class SonosNowApp(App[None]):
         background: $background 70%;
     }
 
-    ResearchScreen {
-        align: center middle;
-        background: $background 70%;
-    }
-
     #help-modal {
         width: 68;
         height: auto;
@@ -102,16 +97,7 @@ class SonosNowApp(App[None]):
         padding: 1 2;
     }
 
-    #research-modal {
-        width: 92;
-        height: 34;
-        border: thick magenta;
-        background: black;
-        color: white;
-        padding: 1 2;
-    }
-
-    #debug-title {
+    #debug-title, #research-title {
         display: none;
         background: cyan;
         color: black;
@@ -119,7 +105,12 @@ class SonosNowApp(App[None]):
         padding: 0 1;
     }
 
-    #debug-pane {
+    #research-title {
+        background: magenta;
+        color: black;
+    }
+
+    #debug-pane, #research-pane {
         display: none;
         height: 33%;
         min-height: 6;
@@ -128,6 +119,10 @@ class SonosNowApp(App[None]):
         color: white;
         overflow-y: auto;
         padding: 0 1;
+    }
+
+    #research-pane {
+        border-top: solid magenta;
     }
     """
 
@@ -164,6 +159,15 @@ class SonosNowApp(App[None]):
         self.debug_events: list[DebugEvent] = []
         self.debug_visible = False
         self.debug_scroll = 0
+        self.research_visible = False
+        self.research_artist = ""
+        self.research_results: tuple[GenreResult, ...] = ()
+        self.research_selected_index = 0
+        self.research_artist_scroll = 0
+        self.research_focus_artists = False
+        self.research_loading = False
+        self.research_error = ""
+        self.research_job_artist = ""
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -174,6 +178,8 @@ class SonosNowApp(App[None]):
             with Vertical(id="detail-pane"):
                 yield Static(" Now Playing ", classes="pane-title")
                 yield Static(id="details")
+                yield Static(" Every Noise Research ", id="research-title")
+                yield Static(id="research-pane")
                 yield Static(" SoCo Debug ", id="debug-title")
                 yield Static(id="debug-pane")
         yield Static(id="status")
@@ -210,6 +216,10 @@ class SonosNowApp(App[None]):
         elif char == "r":
             event.stop()
             await self.action_refresh()
+        elif key == "escape":
+            if self.research_visible:
+                event.stop()
+                self.action_close_research()
         elif char in {"H", "h"}:
             event.stop()
             self.push_screen(HelpScreen())
@@ -224,6 +234,10 @@ class SonosNowApp(App[None]):
             if self.debug_visible:
                 event.stop()
                 self.action_debug_scroll_down()
+        elif key == "enter":
+            if self.research_visible:
+                event.stop()
+                self.action_research_toggle_column()
         elif char in set("123456789"):
             event.stop()
             self.action_tag_speaker(char)
@@ -235,10 +249,16 @@ class SonosNowApp(App[None]):
             await self.action_ungroup_selected()
         elif key == "up":
             event.stop()
-            self.action_cursor_up()
+            if self.research_visible:
+                self.action_research_up()
+            else:
+                self.action_cursor_up()
         elif key == "down":
             event.stop()
-            self.action_cursor_down()
+            if self.research_visible:
+                self.action_research_down()
+            else:
+                self.action_cursor_down()
         elif key == "right":
             event.stop()
             self.action_expand_group()
@@ -259,6 +279,33 @@ class SonosNowApp(App[None]):
     def action_debug_scroll_down(self) -> None:
         self.debug_scroll += 1
         self._render_debug()
+
+    def action_close_research(self) -> None:
+        self.research_visible = False
+        self._render_research()
+        self._set_status("Every Noise research hidden")
+
+    def action_research_toggle_column(self) -> None:
+        self.research_focus_artists = not self.research_focus_artists
+        self._render_research()
+
+    def action_research_up(self) -> None:
+        if self.research_focus_artists:
+            self.research_artist_scroll = max(0, self.research_artist_scroll - 1)
+        else:
+            self.research_selected_index = max(0, self.research_selected_index - 1)
+            self.research_artist_scroll = 0
+        self._render_research()
+
+    def action_research_down(self) -> None:
+        if self.research_focus_artists:
+            selected = self._selected_research_result()
+            max_scroll = max(0, len(selected.artists) - 20) if selected else 0
+            self.research_artist_scroll = min(max_scroll, self.research_artist_scroll + 1)
+        else:
+            self.research_selected_index = min(max(0, len(self.research_results) - 1), self.research_selected_index + 1)
+            self.research_artist_scroll = 0
+        self._render_research()
 
     def action_cursor_up(self) -> None:
         self.selected_index = max(0, self.selected_index - 1)
@@ -486,8 +533,43 @@ class SonosNowApp(App[None]):
         if not artist:
             self._set_status("No artist available for Every Noise research")
             return
+        if self.research_visible and self.research_artist.casefold() == artist.casefold():
+            self.action_close_research()
+            return
+        self.research_visible = True
+        self.research_artist = artist
+        self.research_results = ()
+        self.research_selected_index = 0
+        self.research_artist_scroll = 0
+        self.research_focus_artists = False
+        self.research_error = ""
+        self.research_loading = True
+        self.research_job_artist = artist
         self._set_status(f"Researching {artist} on Every Noise")
-        self.push_screen(ResearchScreen(self.every_noise, artist))
+        self._render_research()
+        self.run_worker(self._load_research_results(artist), exclusive=False)
+
+    async def _load_research_results(self, artist: str) -> None:
+        try:
+            results = await asyncio.to_thread(self.every_noise.search_artist_genres, artist, 10)
+        except Exception as exc:
+            if self.research_job_artist == artist:
+                self.research_error = str(exc)
+                self.research_results = ()
+        else:
+            if self.research_job_artist == artist:
+                self.research_results = results
+                self.research_error = ""
+        finally:
+            if self.research_job_artist == artist:
+                self.research_loading = False
+        self._render_research()
+
+    def _selected_research_result(self) -> GenreResult | None:
+        if not self.research_results:
+            return None
+        index = min(max(0, self.research_selected_index), len(self.research_results) - 1)
+        return self.research_results[index]
 
     async def _run_control(self, label: str, func) -> None:
         if self.view_only:
@@ -801,7 +883,10 @@ class SonosNowApp(App[None]):
     def _set_status(self, message: str) -> None:
         self.message = message
         if self.is_mounted:
-            self.query_one("#status", Static).update(message)
+            try:
+                self.query_one("#status", Static).update(message)
+            except ScreenStackError:
+                pass
 
     def _debug_start(self, label: str, speakers: tuple[str, ...] | list[str]) -> DebugEvent:
         event = DebugEvent(label=label, speakers=tuple(speakers), started_at=time.monotonic())
@@ -881,6 +966,35 @@ class SonosNowApp(App[None]):
         footer = f"o up | l down | {range_text}"
         status = f"running: {self._debug_status_line()}"
         pane.update(Text("\n".join([*visible, "", footer, status]), style="white on black"))
+
+    def _render_research(self) -> None:
+        if not self.is_mounted:
+            return
+        try:
+            title = self.query_one("#research-title", Static)
+            pane = self.query_one("#research-pane", Static)
+        except ScreenStackError:
+            return
+        title.display = self.research_visible
+        pane.display = self.research_visible
+        if not self.research_visible:
+            return
+        pane.update(
+            Text(
+                "\n".join(
+                    _research_lines(
+                        self.research_artist,
+                        self.research_results,
+                        self.research_selected_index,
+                        self.research_artist_scroll,
+                        self.research_focus_artists,
+                        loading=self.research_loading,
+                        error=self.research_error,
+                    )
+                ),
+                style="white on black",
+            )
+        )
 
     def _begin_busy(self, label: str, speakers: tuple[str, ...] | list[str], *, show_status: bool = True) -> None:
         self._busy_label = label
@@ -979,80 +1093,6 @@ class HelpScreen(ModalScreen[None]):
             self.dismiss()
 
 
-class ResearchScreen(ModalScreen[None]):
-    def __init__(self, client: EveryNoiseClient, artist: str) -> None:
-        super().__init__()
-        self.client = client
-        self.artist = artist
-        self.results: tuple[GenreResult, ...] = ()
-        self.selected_index = 0
-        self.artist_scroll = 0
-        self.focus_artists = False
-        self.loading = True
-        self.error = ""
-
-    def compose(self) -> ComposeResult:
-        yield Static(id="research-modal")
-
-    def on_mount(self) -> None:
-        self._render()
-        self.run_worker(self._load(), exclusive=True)
-
-    async def _load(self) -> None:
-        try:
-            self.results = await asyncio.to_thread(self.client.search_artist_genres, self.artist, 10)
-        except Exception as exc:
-            self.error = str(exc)
-        finally:
-            self.loading = False
-        self._render()
-
-    def on_key(self, event) -> None:
-        if event.key == "escape":
-            event.stop()
-            self.dismiss()
-        elif event.key == "enter":
-            event.stop()
-            self.focus_artists = not self.focus_artists
-            self._render()
-        elif event.key == "up":
-            event.stop()
-            if self.focus_artists:
-                self.artist_scroll = max(0, self.artist_scroll - 1)
-            else:
-                self.selected_index = max(0, self.selected_index - 1)
-                self.artist_scroll = 0
-            self._render()
-        elif event.key == "down":
-            event.stop()
-            if self.focus_artists:
-                self.artist_scroll += 1
-            else:
-                self.selected_index = min(max(0, len(self.results) - 1), self.selected_index + 1)
-                self.artist_scroll = 0
-            self._render()
-        elif event.key == "space":
-            event.stop()
-            self.dismiss()
-
-    def _render(self) -> None:
-        if not self.is_mounted:
-            return
-        self.query_one("#research-modal", Static).update(
-            "\n".join(
-                _research_lines(
-                    self.artist,
-                    self.results,
-                    self.selected_index,
-                    self.artist_scroll,
-                    self.focus_artists,
-                    loading=self.loading,
-                    error=self.error,
-                )
-            )
-        )
-
-
 def _track_text(label: str, track: TrackInfo, volumes: tuple[tuple[str, int], ...]) -> str:
     if track.error:
         return f"[{label}]\nerror: {track.error}"
@@ -1115,9 +1155,9 @@ def _research_lines(
     if loading:
         return [*lines, "Searching Every Noise and cached Spotify metadata..."]
     if error:
-        return [*lines, f"Research failed: {error}", "", "Esc closes this window."]
+        return [*lines, f"Research failed: {error}", "", "R or Esc hides this pane."]
     if not results:
-        return [*lines, "No genre matches found.", "", "Esc closes this window."]
+        return [*lines, "No genre matches found.", "", "R or Esc hides this pane."]
 
     selected_index = min(max(0, selected_index), len(results) - 1)
     selected = results[selected_index]
@@ -1153,7 +1193,7 @@ def _research_lines(
         [
             "",
             f"Selected: {selected.genre} via {selected.matched_artist}",
-            "Up/Down moves through genres or artists. Enter switches column. Esc/Space closes.",
+            "Up/Down moves through genres or artists. Enter switches column. R/Esc hides this pane.",
         ]
     )
     return lines

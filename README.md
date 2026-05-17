@@ -83,7 +83,7 @@ sonos-now --subnets 192.168.1.0/24 192.168.20.0/24
 - `i`: volume up
 - `k`: volume down
 - `r`: refresh
-- `R`: Every Noise artist and genre research
+- `R`: show/hide Every Noise artist and genre research in the Now Playing pane
 - `v`: fullscreen visualizer
 - `h`: show help
 - `d`: show/hide the SoCo debug pane

@@ -347,6 +347,27 @@ def test_research_lines_show_ranked_genres_and_artist_column():
     assert "Thom Yorke" in "\n".join(lines)
 
 
+def test_research_navigation_is_app_state_not_a_modal_screen():
+    from sonos_now.app import SonosNowApp
+    from sonos_now.everynoise import GenreResult
+
+    app = SonosNowApp(SonosService())
+    app.research_visible = True
+    app.research_results = (
+        GenreResult("art rock", 122.4, "Radiohead", "artist-id", artists=("Thom Yorke",)),
+        GenreResult("alternative rock", 110.1, "Radiohead", "artist-id", artists=("The Smile",)),
+    )
+
+    app.action_research_down()
+    assert app.research_selected_index == 1
+
+    app.action_research_toggle_column()
+    assert app.research_focus_artists
+
+    app.action_close_research()
+    assert not app.research_visible
+
+
 def test_visualizer_engines_and_secret_scene_render_nonblank_frames():
     from sonos_now.visualizer import ENGINES, _secret_festival
 

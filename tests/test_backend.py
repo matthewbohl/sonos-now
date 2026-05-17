@@ -368,6 +368,24 @@ def test_research_navigation_is_app_state_not_a_modal_screen():
     assert not app.research_visible
 
 
+def test_side_by_side_album_art_keeps_art_to_right_of_metadata():
+    from sonos_now.app import SIDE_BY_SIDE_METADATA_WIDTH, _track_with_side_album_art_text
+    from sonos_now.ascii_art import AlbumArt
+
+    art = AlbumArt(
+        signature="track",
+        lines=("@@", "##"),
+        colors=((7, 7), (4, 4)),
+    )
+
+    rendered = _track_with_side_album_art_text("Song   : A long title\nArtist : Someone", art)
+    lines = rendered.plain.splitlines()
+
+    assert lines[0].startswith("Song   : A long title")
+    assert lines[0].index("+--+") >= SIDE_BY_SIDE_METADATA_WIDTH
+    assert "|@@|" in lines[1]
+
+
 def test_visualizer_engines_and_secret_scene_render_nonblank_frames():
     from sonos_now.visualizer import ENGINES, _secret_festival
 

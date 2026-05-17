@@ -22,6 +22,9 @@ from .visualizer import VisualizerScreen
 ART_STYLES = ("black", "red", "green", "yellow", "blue", "magenta", "cyan", "white")
 SPINNER_CHARS = "|/\\-o%"
 OPTIMISTIC_GROUP_TTL_SECONDS = 8.0
+FULL_ALBUM_ART_SIZE = (56, 24)
+COMPACT_ALBUM_ART_SIZE = (28, 12)
+SIDE_BY_SIDE_METADATA_WIDTH = 44
 
 
 @dataclass
@@ -144,6 +147,10 @@ class SonosNowApp(App[None]):
         self.tag_order: dict[str, list[str]] = {}
         self.selected_index = 0
         self.album_art: dict[str, AlbumArt] = {}
+        self.compact_album_art: dict[str, AlbumArt] = {}
+        self.album_art_bytes: dict[str, bytes] = {}
+        self.album_art_jobs: set[tuple[str, str]] = set()
+        self.album_art_locks: dict[str, asyncio.Lock] = {}
         self.similar_artists: dict[str, tuple[str, ...]] = {}
         self.similar_artist_jobs: set[str] = set()
         self.every_noise = EveryNoiseClient()
@@ -270,6 +277,7 @@ class SonosNowApp(App[None]):
         self.debug_visible = not self.debug_visible
         self.debug_scroll = 0
         self._render_debug()
+        self._refresh_details_for_layout_change()
         self._set_status("Debug pane shown; o/l scroll" if self.debug_visible else "Debug pane hidden")
 
     def action_debug_scroll_up(self) -> None:
@@ -283,6 +291,7 @@ class SonosNowApp(App[None]):
     def action_close_research(self) -> None:
         self.research_visible = False
         self._render_research()
+        self._refresh_details_for_layout_change()
         self._set_status("Every Noise research hidden")
 
     def action_research_toggle_column(self) -> None:
@@ -547,6 +556,7 @@ class SonosNowApp(App[None]):
         self.research_job_artist = artist
         self._set_status(f"Researching {artist} on Every Noise")
         self._render_research()
+        self._refresh_details_for_layout_change()
         self.run_worker(self._load_research_results(artist), exclusive=False)
 
     async def _load_research_results(self, artist: str) -> None:
@@ -570,6 +580,15 @@ class SonosNowApp(App[None]):
             return None
         index = min(max(0, self.research_selected_index), len(self.research_results) - 1)
         return self.research_results[index]
+
+    def _refresh_details_for_layout_change(self) -> None:
+        if not self.is_mounted:
+            return
+        try:
+            self._render_details()
+            self._prefetch_album_art()
+        except ScreenStackError:
+            pass
 
     async def _run_control(self, label: str, func) -> None:
         if self.view_only:
@@ -790,25 +809,48 @@ class SonosNowApp(App[None]):
         for label, track, volumes in items:
             if len(output):
                 output.append("\n\n")
-            output.append(_track_text(label, track, volumes))
+            metadata_text = _track_text(label, track, volumes)
             similar = self.similar_artists.get(track.artist.strip().casefold())
             if similar:
-                output.append(f"\nSimilar Artists: {', '.join(similar[:6])}")
+                metadata_text = f"{metadata_text}\nSimilar Artists: {', '.join(similar[:6])}"
             elif track.artist.strip():
-                output.append("\nSimilar Artists: loading...")
-            art = self.album_art.get(_track_signature(track))
+                metadata_text = f"{metadata_text}\nSimilar Artists: loading..."
+            compact_layout = self._details_use_compact_art()
+            art = self._album_art_cache("compact" if compact_layout else "full").get(_track_signature(track))
             if art and art.is_available:
-                output.append("\n\n")
-                output.append(_album_art_text(art))
+                if compact_layout:
+                    output.append(_track_with_side_album_art_text(metadata_text, art))
+                else:
+                    output.append(metadata_text)
+                    output.append("\n\n")
+                    output.append(_album_art_text(art))
+            else:
+                output.append(metadata_text)
         details.update(output)
 
     def _prefetch_album_art(self) -> None:
         for _label, track, _volumes in self._detail_items():
             signature = _track_signature(track)
-            if not track.album_art_url or signature in self.album_art:
+            if not track.album_art_url:
                 continue
-            self.album_art[signature] = AlbumArt(signature=signature, error="loading")
-            self.run_worker(self._load_album_art(track, signature), exclusive=False)
+            self._queue_album_art(track, signature, "full")
+            if self._details_use_compact_art():
+                self._queue_album_art(track, signature, "compact")
+
+    def _queue_album_art(self, track: TrackInfo, signature: str, variant: str) -> None:
+        cache = self._album_art_cache(variant)
+        job_key = (signature, variant)
+        if signature in cache or job_key in self.album_art_jobs:
+            return
+        cache[signature] = AlbumArt(signature=signature, error="loading")
+        self.album_art_jobs.add(job_key)
+        self.run_worker(self._load_album_art(track, signature, variant), exclusive=False)
+
+    def _album_art_cache(self, variant: str) -> dict[str, AlbumArt]:
+        return self.compact_album_art if variant == "compact" else self.album_art
+
+    def _details_use_compact_art(self) -> bool:
+        return self.debug_visible and self.research_visible
 
     def _prefetch_similar_artists(self) -> None:
         for _label, track, _volumes in self._detail_items():
@@ -829,13 +871,21 @@ class SonosNowApp(App[None]):
             self.similar_artist_jobs.discard(key)
         self._render_details()
 
-    async def _load_album_art(self, track: TrackInfo, signature: str) -> None:
+    async def _load_album_art(self, track: TrackInfo, signature: str, variant: str) -> None:
         try:
-            image = await asyncio.to_thread(fetch_image_bytes, track.album_art_url, 5.0)
-            lines, colors = await asyncio.to_thread(image_bytes_to_colored_ascii, image, 56, 24)
-            self.album_art[signature] = AlbumArt(signature=signature, lines=lines, colors=colors)
+            lock = self.album_art_locks.setdefault(signature, asyncio.Lock())
+            async with lock:
+                image = self.album_art_bytes.get(signature)
+                if image is None:
+                    image = await asyncio.to_thread(fetch_image_bytes, track.album_art_url, 5.0)
+                    self.album_art_bytes[signature] = image
+            width, height = COMPACT_ALBUM_ART_SIZE if variant == "compact" else FULL_ALBUM_ART_SIZE
+            lines, colors = await asyncio.to_thread(image_bytes_to_colored_ascii, image, width, height)
+            self._album_art_cache(variant)[signature] = AlbumArt(signature=signature, lines=lines, colors=colors)
         except Exception as exc:
-            self.album_art[signature] = AlbumArt(signature=signature, error=str(exc))
+            self._album_art_cache(variant)[signature] = AlbumArt(signature=signature, error=str(exc))
+        finally:
+            self.album_art_jobs.discard((signature, variant))
         self._render_details()
 
     def _visible_entries(self) -> list[SpeakerEntry]:
@@ -1121,21 +1171,47 @@ def _metadata_lines(label: str, track: TrackInfo, volumes: tuple[tuple[str, int]
 
 def _album_art_text(album_art: AlbumArt) -> Text:
     text = Text()
+    for index, row in enumerate(_album_art_rows(album_art)):
+        if index:
+            text.append("\n")
+        text.append_text(row)
+    return text
+
+
+def _track_with_side_album_art_text(track_text: str, album_art: AlbumArt) -> Text:
+    left_lines = [_ellipsize(line, SIDE_BY_SIDE_METADATA_WIDTH) for line in track_text.splitlines()]
+    art_rows = _album_art_rows(album_art)
+    row_count = max(len(left_lines), len(art_rows))
+    text = Text()
+    for index in range(row_count):
+        if index:
+            text.append("\n")
+        left = left_lines[index] if index < len(left_lines) else ""
+        text.append(left.ljust(SIDE_BY_SIDE_METADATA_WIDTH))
+        if index < len(art_rows):
+            text.append("  ")
+            text.append_text(art_rows[index])
+    return text
+
+
+def _album_art_rows(album_art: AlbumArt) -> list[Text]:
+    rows: list[Text] = []
     width = max((len(line) for line in album_art.lines), default=0)
     if width:
-        text.append("+" + "-" * width + "+\n", style="cyan on black")
+        rows.append(Text("+" + "-" * width + "+", style="cyan on black"))
     for row_index, line in enumerate(album_art.lines):
+        row = Text()
         colors = album_art.colors[row_index] if row_index < len(album_art.colors) else ()
-        text.append("|", style="cyan on black")
+        row.append("|", style="cyan on black")
         padded = line.ljust(width)
         for col_index, char in enumerate(padded):
             color_index = colors[col_index] if col_index < len(colors) else 7
-            text.append(char, style=f"{ART_STYLES[max(0, min(7, color_index))]} on black")
-        text.append("|", style="cyan on black")
-        text.append("\n")
+            row.append(char, style=f"{ART_STYLES[max(0, min(7, color_index))]} on black")
+        row.append("|", style="cyan on black")
+        rows.append(row)
     if width:
-        text.append("+" + "-" * width + "+", style="cyan on black")
-    return text
+        rows.append(Text("+" + "-" * width + "+", style="cyan on black"))
+    return rows
 
 
 def _research_lines(

@@ -791,14 +791,16 @@ class SonosNowApp(App[None]):
         self.selected_index = min(self.selected_index, max(0, len(visible) - 1))
         speaker_list = self.query_one("#speakers", Static)
         output = Text()
+        track_by_speaker = {track.speaker: track for track in self.tracks}
         for index, entry in enumerate(visible):
             marker = "*" if entry.key in self.marked else " "
             indent = "  " if _is_group_member(entry, self.entries) else ""
             prefix = "# " if entry.is_group else f"{indent}> "
+            state = _speaker_state_indicator(entry, self.entries, track_by_speaker)
             tag = _entry_tag(entry, self.speaker_tags)
             tag_text = f"[{tag}]" if tag else "   "
             spinner = self._speaker_spinner(entry)
-            base = f"{marker} {tag_text} {prefix}"
+            base = f"{marker} {tag_text} {prefix}{state}"
             label = _speaker_row_label(entry, max(4, 30 - len(base) - len(spinner)))
             line = f"{base}{label}{spinner}"
             style = "bold black on cyan" if index == self.selected_index else "yellow" if tag else "white"
@@ -1493,6 +1495,28 @@ def _speaker_row_label(entry: SpeakerEntry, width: int) -> str:
             label = f"{names[0]} + {names[1]} + {len(names) - 2} more"
         return _ellipsize(label, width)
     return _ellipsize(entry.label.strip(), width)
+
+
+def _speaker_state_indicator(entry: SpeakerEntry, entries: list[SpeakerEntry], track_by_speaker: dict[str, TrackInfo]) -> str:
+    if not entry.is_group and _is_group_member(entry, entries):
+        return ""
+    track = _shared_track_for_group(entry, track_by_speaker) if entry.is_group else track_by_speaker.get(entry.speaker or "")
+    return f"{_playback_state_symbol(track)} "
+
+
+def _playback_state_symbol(track: TrackInfo | None) -> str:
+    if track is None or track.error:
+        return "..."
+    state = (track.playback_state or "").casefold()
+    if state in {"playing", "play"}:
+        return ">"
+    if state in {"paused_playback", "paused", "pause"}:
+        return "||"
+    if state in {"stopped", "stop"}:
+        return "[]"
+    if state:
+        return "?"
+    return "..."
 
 
 def _optimistic_group_label(members: tuple[str, ...]) -> str:

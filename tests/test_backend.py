@@ -232,7 +232,15 @@ def test_app_keeps_control_bindings_out_of_textual_footer_to_avoid_double_dispat
 
 
 def test_speaker_rows_use_compact_group_labels_and_requested_spinner_chars():
-    from sonos_now.app import SPINNER_CHARS, _expand_existing_group_members, _grouping_source, _is_group_member, _speaker_row_label
+    from sonos_now.app import (
+        SPINNER_CHARS,
+        _expand_existing_group_members,
+        _grouping_source,
+        _is_group_member,
+        _speaker_row_label,
+        _speaker_state_indicator,
+    )
+    from sonos_now.models import TrackInfo
 
     group = SpeakerEntry(
         "Kitchen, Living Room, Office + Patio Ensemble",
@@ -253,6 +261,18 @@ def test_speaker_rows_use_compact_group_labels_and_requested_spinner_chars():
         "Patio",
         "Den",
     )
+    assert _speaker_state_indicator(group, [group, kitchen], {"Kitchen": TrackInfo("Kitchen", playback_state="PLAYING")}) == "> "
+    assert _speaker_state_indicator(kitchen, [group, kitchen], {"Kitchen": TrackInfo("Kitchen", playback_state="PLAYING")}) == ""
+
+
+def test_playback_state_symbols_are_plain_ascii():
+    from sonos_now.app import _playback_state_symbol
+    from sonos_now.models import TrackInfo
+
+    assert _playback_state_symbol(TrackInfo("Kitchen", playback_state="PLAYING")) == ">"
+    assert _playback_state_symbol(TrackInfo("Kitchen", playback_state="PAUSED_PLAYBACK")) == "||"
+    assert _playback_state_symbol(TrackInfo("Kitchen", playback_state="STOPPED")) == "[]"
+    assert _playback_state_symbol(None) == "..."
 
 
 def test_debug_lines_group_repeated_completed_commands():

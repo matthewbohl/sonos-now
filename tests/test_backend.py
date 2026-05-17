@@ -421,6 +421,23 @@ def test_fullscreen_art_helpers_size_and_muted_fallback():
     assert "#" in muted
 
 
+def test_fullscreen_album_art_animation_preserves_ascii_image():
+    from sonos_now.app import _fullscreen_album_art_text
+    from sonos_now.ascii_art import AlbumArt
+
+    art = AlbumArt(
+        signature="track",
+        lines=("@@", "##"),
+        colors=((7, 7), (4, 4)),
+    )
+
+    static = _fullscreen_album_art_text("Title", art, 24)
+    animated = _fullscreen_album_art_text("Title", art, 24, animation_frame=12)
+
+    assert static.plain == animated.plain
+    assert static.spans != animated.spans
+
+
 def test_fullscreen_album_art_uses_highlighted_entry_not_marked_entries():
     from sonos_now.app import SonosNowApp
     from sonos_now.models import TrackInfo

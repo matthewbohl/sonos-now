@@ -1201,11 +1201,14 @@ class FullscreenAlbumArtScreen(Screen[None]):
         self.image_cache = image_cache if image_cache is not None else {}
         self.art_cache = art_cache if art_cache is not None else {}
         self.error = ""
+        self.current_art: AlbumArt | None = None
+        self.started_at = time.monotonic()
 
     def compose(self) -> ComposeResult:
         yield Static(id="fullscreen-art")
 
     def on_mount(self) -> None:
+        self.set_interval(0.18, self._tick_art)
         self._render_loading_or_fallback()
         if self.track and self.track.album_art_url:
             self.run_worker(self._load(), exclusive=True)
@@ -1254,10 +1257,21 @@ class FullscreenAlbumArtScreen(Screen[None]):
         self.query_one("#fullscreen-art", Static).update(text)
 
     def _render_art(self, art: AlbumArt) -> None:
+        self.current_art = art
+        self._draw_art()
+
+    def _tick_art(self) -> None:
+        if self.current_art is not None:
+            self._draw_art()
+
+    def _draw_art(self) -> None:
         if not self.is_mounted:
             return
+        if self.current_art is None:
+            return
         title = _fullscreen_art_title(self.label, self.track)
-        text = _fullscreen_album_art_text(title, art, self.size.width)
+        frame = int((time.monotonic() - self.started_at) * 8)
+        text = _fullscreen_album_art_text(title, self.current_art, self.size.width, frame)
         self.query_one("#fullscreen-art", Static).update(text)
 
 
@@ -1312,37 +1326,72 @@ def _track_with_side_album_art_text(track_text: str, album_art: AlbumArt) -> Tex
     return text
 
 
-def _album_art_rows(album_art: AlbumArt) -> list[Text]:
+def _album_art_rows(album_art: AlbumArt, animation_frame: int | None = None) -> list[Text]:
     rows: list[Text] = []
     width = max((len(line) for line in album_art.lines), default=0)
+    border_style = _album_art_border_style(animation_frame)
     if width:
-        rows.append(Text("+" + "-" * width + "+", style="cyan on black"))
+        rows.append(Text("+" + "-" * width + "+", style=border_style))
     for row_index, line in enumerate(album_art.lines):
         row = Text()
         colors = album_art.colors[row_index] if row_index < len(album_art.colors) else ()
-        row.append("|", style="cyan on black")
+        row.append("|", style=border_style)
         padded = line.ljust(width)
         for col_index, char in enumerate(padded):
             color_index = colors[col_index] if col_index < len(colors) else 7
-            row.append(char, style=f"{ART_STYLES[max(0, min(7, color_index))]} on black")
-        row.append("|", style="cyan on black")
+            row.append(char, style=_album_art_pixel_style(color_index, row_index, col_index, char, animation_frame))
+        row.append("|", style=border_style)
         rows.append(row)
     if width:
-        rows.append(Text("+" + "-" * width + "+", style="cyan on black"))
+        rows.append(Text("+" + "-" * width + "+", style=border_style))
     return rows
 
 
-def _fullscreen_album_art_text(title: str, album_art: AlbumArt, screen_width: int) -> Text:
+def _fullscreen_album_art_text(title: str, album_art: AlbumArt, screen_width: int, animation_frame: int | None = None) -> Text:
     width = max(1, screen_width)
-    text = Text(title.center(width), style="bold white on black")
+    accent = _fullscreen_animation_accent(animation_frame)
+    text = Text(title.center(width), style=f"bold {accent} on black")
     text.append("\n")
-    for row in _album_art_rows(album_art):
+    for row in _album_art_rows(album_art, animation_frame):
         pad = max(0, (width - len(row.plain)) // 2)
         text.append(" " * pad)
         text.append_text(row)
         text.append("\n")
-    text.append(" any key returns ".center(width), style="bold cyan on black")
+    text.append(" any key returns ".center(width), style=f"bold {accent} on black")
     return text
+
+
+def _album_art_border_style(animation_frame: int | None = None) -> str:
+    if animation_frame is None:
+        return "cyan on black"
+    colors = ("cyan", "cyan", "blue", "cyan", "magenta", "cyan")
+    return f"{colors[(animation_frame // 5) % len(colors)]} on black"
+
+
+def _album_art_pixel_style(
+    color_index: int,
+    row: int,
+    col: int,
+    char: str,
+    animation_frame: int | None = None,
+) -> str:
+    color_index = max(0, min(7, color_index))
+    if animation_frame is None or char == " ":
+        return f"{ART_STYLES[color_index]} on black"
+    shimmer = (row * 7 + col * 11 + animation_frame) % 43 == 0
+    slow_wave = (row + animation_frame // 2) % 17 == 0 and col % 5 == 0
+    if shimmer:
+        return "bold white on black"
+    if slow_wave:
+        return f"bold {ART_STYLES[(color_index + 1) % len(ART_STYLES)]} on black"
+    return f"{ART_STYLES[color_index]} on black"
+
+
+def _fullscreen_animation_accent(animation_frame: int | None = None) -> str:
+    if animation_frame is None:
+        return "white"
+    accents = ("white", "cyan", "white", "magenta", "white", "blue")
+    return accents[(animation_frame // 8) % len(accents)]
 
 
 def _fullscreen_art_title(label: str, track: TrackInfo | None) -> str:

@@ -261,7 +261,7 @@ def test_speaker_rows_use_compact_group_labels_and_requested_spinner_chars():
         "Patio",
         "Den",
     )
-    assert _speaker_state_indicator(group, [group, kitchen], {"Kitchen": TrackInfo("Kitchen", playback_state="PLAYING")}) == "> "
+    assert _speaker_state_indicator(group, [group, kitchen], {"Kitchen": TrackInfo("Kitchen", playback_state="PLAYING")}) == " [>]"
     assert _speaker_state_indicator(kitchen, [group, kitchen], {"Kitchen": TrackInfo("Kitchen", playback_state="PLAYING")}) == ""
 
 

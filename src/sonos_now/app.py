@@ -800,9 +800,9 @@ class SonosNowApp(App[None]):
             tag = _entry_tag(entry, self.speaker_tags)
             tag_text = f"[{tag}]" if tag else "   "
             spinner = self._speaker_spinner(entry)
-            base = f"{marker} {tag_text} {prefix}{state}"
-            label = _speaker_row_label(entry, max(4, 30 - len(base) - len(spinner)))
-            line = f"{base}{label}{spinner}"
+            base = f"{marker} {tag_text} {prefix}"
+            label = _speaker_row_label(entry, max(4, 30 - len(base) - len(state) - len(spinner)))
+            line = f"{base}{label}{state}{spinner}"
             style = "bold black on cyan" if index == self.selected_index else "yellow" if tag else "white"
             output.append(line.ljust(30), style=style)
             if index < len(visible) - 1:
@@ -1550,7 +1550,7 @@ def _speaker_state_indicator(entry: SpeakerEntry, entries: list[SpeakerEntry], t
     if not entry.is_group and _is_group_member(entry, entries):
         return ""
     track = _shared_track_for_group(entry, track_by_speaker) if entry.is_group else track_by_speaker.get(entry.speaker or "")
-    return f"{_playback_state_symbol(track)} "
+    return f" [{_playback_state_symbol(track)}]"
 
 
 def _playback_state_symbol(track: TrackInfo | None) -> str:

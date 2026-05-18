@@ -11,21 +11,40 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Header, Static
 from rich.text import Text
 
-from .ascii_art import AlbumArt, fetch_image_bytes, image_bytes_to_colored_ascii
+from .art_manager import AlbumArtManager
+from .ascii_art import AlbumArt
 from .everynoise import EveryNoiseClient, GenreResult
+from .grouping import (
+    entry_speakers as _entry_speakers,
+    entry_tag as _entry_tag,
+    expand_existing_group_members as _expand_existing_group_members,
+    grouping_source as _grouping_source,
+    is_group_member as _is_group_member,
+    optimistic_group_label as _optimistic_group_label,
+    shared_track_for_group as _shared_track_for_group,
+    track_signature as _track_signature,
+    volumes_for as _volumes_for,
+)
 from .models import SonosSnapshot, SpeakerEntry, TrackInfo
-from .progress import progress_bar
+from .rendering import (
+    album_art_text as _album_art_text,
+    elapsed_text as _elapsed_text,
+    fullscreen_album_art_text as _fullscreen_album_art_text,
+    fullscreen_art_size as _fullscreen_art_size,
+    fullscreen_art_title as _fullscreen_art_title,
+    muted_speaker_text as _muted_speaker_text,
+    research_lines as _research_lines,
+    speaker_row_label as _speaker_row_label,
+    speaker_state_indicator as _speaker_state_indicator,
+    track_text as _track_text,
+    track_with_side_album_art_text as _track_with_side_album_art_text,
+)
 from .soco_backend import SonosService
-from .timefmt import format_duration
+from .state import ResearchState
 from .visualizer import VisualizerScreen
 
-ART_STYLES = ("black", "red", "green", "yellow", "blue", "magenta", "cyan", "white")
 SPINNER_CHARS = "|/\\-o%"
 OPTIMISTIC_GROUP_TTL_SECONDS = 8.0
-FULL_ALBUM_ART_SIZE = (56, 24)
-COMPACT_ALBUM_ART_SIZE = (28, 12)
-SIDE_BY_SIDE_METADATA_WIDTH = 44
-MIN_FULLSCREEN_ART_SIZE = (32, 12)
 
 
 @dataclass
@@ -39,96 +58,7 @@ class DebugEvent:
 
 
 class SonosNowApp(App[None]):
-    CSS = """
-    Screen {
-        background: #001b4d;
-        color: white;
-    }
-
-    #layout {
-        height: 1fr;
-    }
-
-    #speaker-pane {
-        width: 34;
-        border: solid cyan;
-        background: #002b6f;
-    }
-
-    #detail-pane {
-        width: 1fr;
-        border: solid cyan;
-        background: #00245f;
-    }
-
-    .pane-title {
-        background: cyan;
-        color: black;
-        text-style: bold;
-        padding: 0 1;
-    }
-
-    #speakers {
-        height: 1fr;
-        padding: 0 1;
-    }
-
-    #details {
-        height: 1fr;
-        overflow-y: auto;
-        padding: 1 2;
-    }
-
-    #status {
-        dock: bottom;
-        height: 1;
-        background: black;
-        color: cyan;
-        text-style: bold;
-    }
-
-    HelpScreen {
-        align: center middle;
-        background: $background 70%;
-    }
-
-    #help-modal {
-        width: 68;
-        height: auto;
-        border: thick cyan;
-        background: black;
-        color: white;
-        padding: 1 2;
-    }
-
-    #debug-title, #research-title {
-        display: none;
-        background: cyan;
-        color: black;
-        text-style: bold;
-        padding: 0 1;
-    }
-
-    #research-title {
-        background: magenta;
-        color: black;
-    }
-
-    #debug-pane, #research-pane {
-        display: none;
-        height: 33%;
-        min-height: 6;
-        border-top: solid cyan;
-        background: black;
-        color: white;
-        overflow-y: auto;
-        padding: 0 1;
-    }
-
-    #research-pane {
-        border-top: solid magenta;
-    }
-    """
+    CSS_PATH = "sonos_now.tcss"
 
     BINDINGS = [
         Binding("q", "quit", "Quit"),
@@ -138,26 +68,22 @@ class SonosNowApp(App[None]):
         super().__init__()
         self.service = service
         self.refresh_interval = refresh_interval
+        self.topology_refresh_interval = max(10.0, refresh_interval * 5)
         self.view_only = view_only
         self.entries: list[SpeakerEntry] = []
         self.tracks: list[TrackInfo] = []
         self.expanded_groups: set[str] = set()
         self.collapsed_groups: set[str] = set()
-        self.marked: set[str] = set()
         self.speaker_tags: dict[str, str] = {}
         self.tag_order: dict[str, list[str]] = {}
         self.selected_index = 0
-        self.album_art: dict[str, AlbumArt] = {}
-        self.compact_album_art: dict[str, AlbumArt] = {}
-        self.fullscreen_album_art: dict[tuple[str, int, int], AlbumArt] = {}
-        self.album_art_bytes: dict[str, bytes] = {}
-        self.album_art_jobs: set[tuple[str, str]] = set()
-        self.album_art_locks: dict[str, asyncio.Lock] = {}
+        self.album_art = AlbumArtManager()
         self.similar_artists: dict[str, tuple[str, ...]] = {}
         self.similar_artist_jobs: set[str] = set()
         self.every_noise = EveryNoiseClient()
         self.message = "Starting Sonos Now"
-        self._refreshing = False
+        self._refreshing_topology = False
+        self._refreshing_tracks = False
         self._busy_label = ""
         self._busy_started_at = 0.0
         self._busy_speakers: set[str] = set()
@@ -168,15 +94,7 @@ class SonosNowApp(App[None]):
         self.debug_events: list[DebugEvent] = []
         self.debug_visible = False
         self.debug_scroll = 0
-        self.research_visible = False
-        self.research_artist = ""
-        self.research_results: tuple[GenreResult, ...] = ()
-        self.research_selected_index = 0
-        self.research_artist_scroll = 0
-        self.research_focus_artists = False
-        self.research_loading = False
-        self.research_error = ""
-        self.research_job_artist = ""
+        self.research = ResearchState()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -194,7 +112,8 @@ class SonosNowApp(App[None]):
         yield Static(id="status")
 
     def on_mount(self) -> None:
-        self.set_interval(self.refresh_interval, self.action_refresh)
+        self.set_interval(self.refresh_interval, self.action_refresh_tracks)
+        self.set_interval(self.topology_refresh_interval, self.action_refresh)
         self.set_interval(0.15, self._tick_status)
         self.call_later(self.action_refresh)
 
@@ -203,19 +122,19 @@ class SonosNowApp(App[None]):
         char = getattr(event, "character", "") or ""
         if char in {"P", "p"}:
             event.stop()
-            await self.action_play_pause()
+            self.run_worker(self.action_play_pause(), exclusive=False)
         elif char in {"F", "f"}:
             event.stop()
-            await self.action_next_track()
+            self.run_worker(self.action_next_track(), exclusive=False)
         elif char in {"B", "b"}:
             event.stop()
-            await self.action_previous_track()
+            self.run_worker(self.action_previous_track(), exclusive=False)
         elif char in {"I", "i"}:
             event.stop()
-            await self.action_volume_up()
+            self.run_worker(self.action_volume_up(), exclusive=False)
         elif char in {"K", "k"}:
             event.stop()
-            await self.action_volume_down()
+            self.run_worker(self.action_volume_down(), exclusive=False)
         elif char in {"V", "v"}:
             event.stop()
             self.action_visualizer()
@@ -227,9 +146,9 @@ class SonosNowApp(App[None]):
             self.action_research_artist()
         elif char == "r":
             event.stop()
-            await self.action_refresh()
+            self.run_worker(self.action_refresh(force=True), exclusive=False)
         elif key == "escape":
-            if self.research_visible:
+            if self.research.visible:
                 event.stop()
                 self.action_close_research()
         elif char in {"H", "h"}:
@@ -247,7 +166,7 @@ class SonosNowApp(App[None]):
                 event.stop()
                 self.action_debug_scroll_down()
         elif key == "enter":
-            if self.research_visible:
+            if self.research.visible:
                 event.stop()
                 self.action_research_toggle_column()
         elif char in set("123456789"):
@@ -255,19 +174,19 @@ class SonosNowApp(App[None]):
             self.action_tag_speaker(char)
         elif char == "g":
             event.stop()
-            await self.action_group_tagged()
+            self.run_worker(self.action_group_tagged(), exclusive=False)
         elif char == "G":
             event.stop()
-            await self.action_ungroup_selected()
+            self.run_worker(self.action_ungroup_selected(), exclusive=False)
         elif key == "up":
             event.stop()
-            if self.research_visible:
+            if self.research.visible:
                 self.action_research_up()
             else:
                 self.action_cursor_up()
         elif key == "down":
             event.stop()
-            if self.research_visible:
+            if self.research.visible:
                 self.action_research_down()
             else:
                 self.action_cursor_down()
@@ -294,31 +213,31 @@ class SonosNowApp(App[None]):
         self._render_debug()
 
     def action_close_research(self) -> None:
-        self.research_visible = False
+        self.research.visible = False
         self._render_research()
         self._refresh_details_for_layout_change()
         self._set_status("Every Noise research hidden")
 
     def action_research_toggle_column(self) -> None:
-        self.research_focus_artists = not self.research_focus_artists
+        self.research.focus_artists = not self.research.focus_artists
         self._render_research()
 
     def action_research_up(self) -> None:
-        if self.research_focus_artists:
-            self.research_artist_scroll = max(0, self.research_artist_scroll - 1)
+        if self.research.focus_artists:
+            self.research.artist_scroll = max(0, self.research.artist_scroll - 1)
         else:
-            self.research_selected_index = max(0, self.research_selected_index - 1)
-            self.research_artist_scroll = 0
+            self.research.selected_index = max(0, self.research.selected_index - 1)
+            self.research.artist_scroll = 0
         self._render_research()
 
     def action_research_down(self) -> None:
-        if self.research_focus_artists:
+        if self.research.focus_artists:
             selected = self._selected_research_result()
             max_scroll = max(0, len(selected.artists) - 20) if selected else 0
-            self.research_artist_scroll = min(max_scroll, self.research_artist_scroll + 1)
+            self.research.artist_scroll = min(max_scroll, self.research.artist_scroll + 1)
         else:
-            self.research_selected_index = min(max(0, len(self.research_results) - 1), self.research_selected_index + 1)
-            self.research_artist_scroll = 0
+            self.research.selected_index = min(max(0, len(self.research.results) - 1), self.research.selected_index + 1)
+            self.research.artist_scroll = 0
         self._render_research()
 
     def action_cursor_up(self) -> None:
@@ -332,38 +251,59 @@ class SonosNowApp(App[None]):
         self._render_details()
 
     async def action_refresh(self, force: bool = False) -> None:
-        if isinstance(self.screen, VisualizerScreen):
+        if self._visualizer_active():
             return
-        if self._refreshing:
+        if self._refreshing_topology or self._refreshing_tracks:
             return
-        self._refreshing = True
-        debug_event = self._debug_start("refresh snapshot", ())
+        self._refreshing_topology = True
+        debug_event = self._debug_start("refresh topology", ())
+        refresh_tracks = False
         try:
-            snapshot = await asyncio.to_thread(self.service.snapshot)
+            entries = await asyncio.to_thread(self.service.refresh_topology)
+            warnings = getattr(self.service, "warnings", ())
         except Exception as exc:
             self._debug_finish(debug_event, "failed", str(exc))
             self._set_status(f"Refresh failed: {exc}")
         else:
             self._debug_finish(debug_event, "done")
-            if force or not self._busy_label:
+            snapshot = SonosSnapshot(entries=tuple(entries), tracks=tuple(self.tracks), warnings=tuple(warnings))
+            if (force or not self._busy_label) and not self._should_defer_snapshot_for_optimistic_groups(snapshot):
                 self._apply_snapshot(snapshot)
+                entry_speakers = {entry.speaker for entry in self.entries if entry.speaker}
+                track_speakers = {track.speaker for track in self.tracks}
+                refresh_tracks = force or bool(entry_speakers - track_speakers)
             else:
                 self._render_debug()
         finally:
-            self._refreshing = False
+            self._refreshing_topology = False
+        if refresh_tracks:
+            await self.action_refresh_tracks()
 
-    def action_mark(self) -> None:
-        entry = self._selected_entry()
-        if not entry:
+    async def action_refresh_tracks(self) -> None:
+        if self._visualizer_active():
             return
-        if entry.key in self.marked:
-            self.marked.remove(entry.key)
-            self._set_status(f"Unmarked {entry.label.strip()}")
+        if self._refreshing_tracks or self._refreshing_topology or not self.entries:
+            return
+        self._refreshing_tracks = True
+        debug_event = self._debug_start("refresh tracks", ())
+        try:
+            tracks = await asyncio.to_thread(self.service.tracks_for_entries, tuple(self.entries))
+        except Exception as exc:
+            self._debug_finish(debug_event, "failed", str(exc))
+            self._set_status(f"Track refresh failed: {exc}")
         else:
-            self.marked.add(entry.key)
-            self._set_status(f"Marked {entry.label.strip()}")
-        self._render_speakers()
-        self._render_details()
+            self._debug_finish(debug_event, "done")
+            self.tracks = list(tracks)
+            if self.is_mounted:
+                try:
+                    self._render_speakers()
+                    self._render_details()
+                    self._prefetch_album_art()
+                    self._prefetch_similar_artists()
+                except ScreenStackError:
+                    pass
+        finally:
+            self._refreshing_tracks = False
 
     def action_tag_speaker(self, tag: str) -> None:
         entry = self._selected_entry()
@@ -548,7 +488,7 @@ class SonosNowApp(App[None]):
         if track.error or not track.album_art_url:
             self.push_screen(FullscreenAlbumArtScreen(label))
             return
-        self.push_screen(FullscreenAlbumArtScreen(label, track, self.album_art_bytes, self.fullscreen_album_art))
+        self.push_screen(FullscreenAlbumArtScreen(label, track, self.album_art))
 
     def action_research_artist(self) -> None:
         artist = next(
@@ -558,18 +498,10 @@ class SonosNowApp(App[None]):
         if not artist:
             self._set_status("No artist available for Every Noise research")
             return
-        if self.research_visible and self.research_artist.casefold() == artist.casefold():
+        if self.research.visible and self.research.artist.casefold() == artist.casefold():
             self.action_close_research()
             return
-        self.research_visible = True
-        self.research_artist = artist
-        self.research_results = ()
-        self.research_selected_index = 0
-        self.research_artist_scroll = 0
-        self.research_focus_artists = False
-        self.research_error = ""
-        self.research_loading = True
-        self.research_job_artist = artist
+        self.research = ResearchState(visible=True, artist=artist, loading=True, job_artist=artist)
         self._set_status(f"Researching {artist} on Every Noise")
         self._render_research()
         self._refresh_details_for_layout_change()
@@ -579,23 +511,23 @@ class SonosNowApp(App[None]):
         try:
             results = await asyncio.to_thread(self.every_noise.search_artist_genres, artist, 10)
         except Exception as exc:
-            if self.research_job_artist == artist:
-                self.research_error = str(exc)
-                self.research_results = ()
+            if self.research.job_artist == artist:
+                self.research.error = str(exc)
+                self.research.results = ()
         else:
-            if self.research_job_artist == artist:
-                self.research_results = results
-                self.research_error = ""
+            if self.research.job_artist == artist:
+                self.research.results = results
+                self.research.error = ""
         finally:
-            if self.research_job_artist == artist:
-                self.research_loading = False
+            if self.research.job_artist == artist:
+                self.research.loading = False
         self._render_research()
 
     def _selected_research_result(self) -> GenreResult | None:
-        if not self.research_results:
+        if not self.research.results:
             return None
-        index = min(max(0, self.research_selected_index), len(self.research_results) - 1)
-        return self.research_results[index]
+        index = min(max(0, self.research.selected_index), len(self.research.results) - 1)
+        return self.research.results[index]
 
     def _refresh_details_for_layout_change(self) -> None:
         if not self.is_mounted:
@@ -639,10 +571,11 @@ class SonosNowApp(App[None]):
 
         selected_key = self._selected_entry().key if self._selected_entry() else ""
         self.entries = list(snapshot.entries)
-        self.tracks = list(snapshot.tracks)
-        valid_keys = {entry.key for entry in self.entries}
-        valid_speakers = {entry.speaker for entry in self.entries if entry.speaker}
-        self.marked.intersection_update(valid_keys)
+        valid_track_speakers = {entry.speaker for entry in self.entries if entry.speaker}
+        self.tracks = [track for track in snapshot.tracks if track.speaker in valid_track_speakers]
+        if snapshot.warnings and not self.entries:
+            self._set_status("; ".join(snapshot.warnings[-2:]))
+        valid_speakers = valid_track_speakers
         self.speaker_tags = {speaker: tag for speaker, tag in self.speaker_tags.items() if speaker in valid_speakers}
         self.tag_order = {
             tag: [speaker for speaker in speakers if speaker in valid_speakers and self.speaker_tags.get(speaker) == tag]
@@ -793,14 +726,13 @@ class SonosNowApp(App[None]):
         output = Text()
         track_by_speaker = {track.speaker: track for track in self.tracks}
         for index, entry in enumerate(visible):
-            marker = "*" if entry.key in self.marked else " "
             indent = "  " if _is_group_member(entry, self.entries) else ""
             prefix = "# " if entry.is_group else f"{indent}> "
             state = _speaker_state_indicator(entry, self.entries, track_by_speaker)
             tag = _entry_tag(entry, self.speaker_tags)
             tag_text = f"[{tag}]" if tag else "   "
             spinner = self._speaker_spinner(entry)
-            base = f"{marker} {tag_text} {prefix}"
+            base = f"{tag_text} {prefix}"
             label = _speaker_row_label(entry, max(4, 30 - len(base) - len(state) - len(spinner)))
             line = f"{base}{label}{state}{spinner}"
             style = "bold black on cyan" if index == self.selected_index else "yellow" if tag else "white"
@@ -834,7 +766,7 @@ class SonosNowApp(App[None]):
             elif track.artist.strip():
                 metadata_text = f"{metadata_text}\nSimilar Artists: loading..."
             compact_layout = self._details_use_compact_art()
-            art = self._album_art_cache("compact" if compact_layout else "full").get(_track_signature(track))
+            art = self.album_art.cache("compact" if compact_layout else "full").get(_track_signature(track))
             if art and art.is_available:
                 if compact_layout:
                     output.append(_track_with_side_album_art_text(metadata_text, art))
@@ -856,19 +788,16 @@ class SonosNowApp(App[None]):
                 self._queue_album_art(track, signature, "compact")
 
     def _queue_album_art(self, track: TrackInfo, signature: str, variant: str) -> None:
-        cache = self._album_art_cache(variant)
+        cache = self.album_art.cache(variant)
         job_key = (signature, variant)
-        if signature in cache or job_key in self.album_art_jobs:
+        if signature in cache or job_key in self.album_art.jobs:
             return
         cache[signature] = AlbumArt(signature=signature, error="loading")
-        self.album_art_jobs.add(job_key)
-        self.run_worker(self._load_album_art(track, signature, variant), exclusive=False)
-
-    def _album_art_cache(self, variant: str) -> dict[str, AlbumArt]:
-        return self.compact_album_art if variant == "compact" else self.album_art
+        self.album_art.jobs.add(job_key)
+        self.run_worker(self._load_album_art_variant(track, signature, variant), exclusive=False)
 
     def _details_use_compact_art(self) -> bool:
-        return self.debug_visible and self.research_visible
+        return self.debug_visible and self.research.visible
 
     def _prefetch_similar_artists(self) -> None:
         for _label, track, _volumes in self._detail_items():
@@ -889,21 +818,8 @@ class SonosNowApp(App[None]):
             self.similar_artist_jobs.discard(key)
         self._render_details()
 
-    async def _load_album_art(self, track: TrackInfo, signature: str, variant: str) -> None:
-        try:
-            lock = self.album_art_locks.setdefault(signature, asyncio.Lock())
-            async with lock:
-                image = self.album_art_bytes.get(signature)
-                if image is None:
-                    image = await asyncio.to_thread(fetch_image_bytes, track.album_art_url, 5.0)
-                    self.album_art_bytes[signature] = image
-            width, height = COMPACT_ALBUM_ART_SIZE if variant == "compact" else FULL_ALBUM_ART_SIZE
-            lines, colors = await asyncio.to_thread(image_bytes_to_colored_ascii, image, width, height)
-            self._album_art_cache(variant)[signature] = AlbumArt(signature=signature, lines=lines, colors=colors)
-        except Exception as exc:
-            self._album_art_cache(variant)[signature] = AlbumArt(signature=signature, error=str(exc))
-        finally:
-            self.album_art_jobs.discard((signature, variant))
+    async def _load_album_art_variant(self, track: TrackInfo, signature: str, variant: str) -> None:
+        await self.album_art.load_variant(track, signature, variant)
         self._render_details()
 
     def _visible_entries(self) -> list[SpeakerEntry]:
@@ -927,8 +843,6 @@ class SonosNowApp(App[None]):
         return visible[min(self.selected_index, len(visible) - 1)]
 
     def _control_entries(self) -> list[SpeakerEntry]:
-        if self.marked:
-            return [entry for entry in self.entries if entry.key in self.marked]
         entry = self._selected_entry()
         return [entry] if entry else []
 
@@ -1056,21 +970,21 @@ class SonosNowApp(App[None]):
             pane = self.query_one("#research-pane", Static)
         except ScreenStackError:
             return
-        title.display = self.research_visible
-        pane.display = self.research_visible
-        if not self.research_visible:
+        title.display = self.research.visible
+        pane.display = self.research.visible
+        if not self.research.visible:
             return
         pane.update(
             Text(
                 "\n".join(
                     _research_lines(
-                        self.research_artist,
-                        self.research_results,
-                        self.research_selected_index,
-                        self.research_artist_scroll,
-                        self.research_focus_artists,
-                        loading=self.research_loading,
-                        error=self.research_error,
+                        self.research.artist,
+                        self.research.results,
+                        self.research.selected_index,
+                        self.research.artist_scroll,
+                        self.research.focus_artists,
+                        loading=self.research.loading,
+                        error=self.research.error,
                     )
                 ),
                 style="white on black",
@@ -1125,6 +1039,12 @@ class SonosNowApp(App[None]):
             self._set_status(f"Command just sent; waiting {remaining:.1f}s for Sonos")
             return True
         return False
+
+    def _visualizer_active(self) -> bool:
+        try:
+            return isinstance(self.screen, VisualizerScreen)
+        except ScreenStackError:
+            return False
 
 
 class HelpScreen(ModalScreen[None]):
@@ -1192,14 +1112,12 @@ class FullscreenAlbumArtScreen(Screen[None]):
         self,
         label: str,
         track: TrackInfo | None = None,
-        image_cache: dict[str, bytes] | None = None,
-        art_cache: dict[tuple[str, int, int], AlbumArt] | None = None,
+        album_art: AlbumArtManager | None = None,
     ) -> None:
         super().__init__()
         self.label = label
         self.track = track
-        self.image_cache = image_cache if image_cache is not None else {}
-        self.art_cache = art_cache if art_cache is not None else {}
+        self.album_art = album_art or AlbumArtManager()
         self.error = ""
         self.current_art: AlbumArt | None = None
         self.started_at = time.monotonic()
@@ -1229,21 +1147,12 @@ class FullscreenAlbumArtScreen(Screen[None]):
             return
         signature = _track_signature(self.track)
         width, height = _fullscreen_art_size(self.size.width, self.size.height)
-        cache_key = (signature, width, height)
-        art = self.art_cache.get(cache_key)
-        if art is None:
-            try:
-                image = self.image_cache.get(signature)
-                if image is None:
-                    image = await asyncio.to_thread(fetch_image_bytes, self.track.album_art_url, 5.0)
-                    self.image_cache[signature] = image
-                lines, colors = await asyncio.to_thread(image_bytes_to_colored_ascii, image, width, height)
-                art = AlbumArt(signature=signature, lines=lines, colors=colors)
-                self.art_cache[cache_key] = art
-            except Exception as exc:
-                self.error = str(exc)
-                self._render_loading_or_fallback()
-                return
+        try:
+            art = await self.album_art.fullscreen_art(self.track, signature, width, height)
+        except Exception as exc:
+            self.error = str(exc)
+            self._render_loading_or_fallback()
+            return
         self._render_art(art)
 
     def _render_loading_or_fallback(self) -> None:
@@ -1273,389 +1182,3 @@ class FullscreenAlbumArtScreen(Screen[None]):
         frame = int((time.monotonic() - self.started_at) * 8)
         text = _fullscreen_album_art_text(title, self.current_art, self.size.width, frame)
         self.query_one("#fullscreen-art", Static).update(text)
-
-
-def _track_text(label: str, track: TrackInfo, volumes: tuple[tuple[str, int], ...]) -> str:
-    if track.error:
-        return f"[{label}]\nerror: {track.error}"
-    elapsed = format_duration(track.position)
-    total = format_duration(track.duration)
-    percent = f"{int((track.progress or 0) * 100):3d}%" if track.progress is not None else " --%"
-    return "\n".join(
-        _metadata_lines(label, track, volumes)
-    )
-
-
-def _metadata_lines(label: str, track: TrackInfo, volumes: tuple[tuple[str, int], ...]) -> list[str]:
-    elapsed = format_duration(track.position)
-    total = format_duration(track.duration)
-    percent = f"{int((track.progress or 0) * 100):3d}%" if track.progress is not None else " --%"
-    return [
-            f"[{label}]",
-            f"Song   : {track.title or 'Unknown title'}",
-            f"Artist : {track.artist or 'Unknown artist'}",
-            f"Album  : {track.album or 'Unknown album'}",
-            f"Volume : {_volume_text(volumes, track)}",
-            f"Time   : {elapsed} / {total} {track.playback_state} {percent}".rstrip(),
-            f"Progress {progress_bar(track.progress, 36)}",
-    ]
-
-
-def _album_art_text(album_art: AlbumArt) -> Text:
-    text = Text()
-    for index, row in enumerate(_album_art_rows(album_art)):
-        if index:
-            text.append("\n")
-        text.append_text(row)
-    return text
-
-
-def _track_with_side_album_art_text(track_text: str, album_art: AlbumArt) -> Text:
-    left_lines = [_ellipsize(line, SIDE_BY_SIDE_METADATA_WIDTH) for line in track_text.splitlines()]
-    art_rows = _album_art_rows(album_art)
-    row_count = max(len(left_lines), len(art_rows))
-    text = Text()
-    for index in range(row_count):
-        if index:
-            text.append("\n")
-        left = left_lines[index] if index < len(left_lines) else ""
-        text.append(left.ljust(SIDE_BY_SIDE_METADATA_WIDTH))
-        if index < len(art_rows):
-            text.append("  ")
-            text.append_text(art_rows[index])
-    return text
-
-
-def _album_art_rows(album_art: AlbumArt, animation_frame: int | None = None) -> list[Text]:
-    rows: list[Text] = []
-    width = max((len(line) for line in album_art.lines), default=0)
-    border_style = _album_art_border_style(animation_frame)
-    if width:
-        rows.append(Text("+" + "-" * width + "+", style=border_style))
-    for row_index, line in enumerate(album_art.lines):
-        row = Text()
-        colors = album_art.colors[row_index] if row_index < len(album_art.colors) else ()
-        row.append("|", style=border_style)
-        padded = line.ljust(width)
-        for col_index, char in enumerate(padded):
-            color_index = colors[col_index] if col_index < len(colors) else 7
-            row.append(char, style=_album_art_pixel_style(color_index, row_index, col_index, char, animation_frame))
-        row.append("|", style=border_style)
-        rows.append(row)
-    if width:
-        rows.append(Text("+" + "-" * width + "+", style=border_style))
-    return rows
-
-
-def _fullscreen_album_art_text(title: str, album_art: AlbumArt, screen_width: int, animation_frame: int | None = None) -> Text:
-    width = max(1, screen_width)
-    accent = _fullscreen_animation_accent(animation_frame)
-    text = Text(title.center(width), style=f"bold {accent} on black")
-    text.append("\n")
-    for row in _album_art_rows(album_art, animation_frame):
-        pad = max(0, (width - len(row.plain)) // 2)
-        text.append(" " * pad)
-        text.append_text(row)
-        text.append("\n")
-    text.append(" any key returns ".center(width), style=f"bold {accent} on black")
-    return text
-
-
-def _album_art_border_style(animation_frame: int | None = None) -> str:
-    if animation_frame is None:
-        return "cyan on black"
-    colors = ("cyan", "cyan", "blue", "cyan", "magenta", "cyan")
-    return f"{colors[(animation_frame // 5) % len(colors)]} on black"
-
-
-def _album_art_pixel_style(
-    color_index: int,
-    row: int,
-    col: int,
-    char: str,
-    animation_frame: int | None = None,
-) -> str:
-    color_index = max(0, min(7, color_index))
-    if animation_frame is None or char == " ":
-        return f"{ART_STYLES[color_index]} on black"
-    shimmer = (row * 7 + col * 11 + animation_frame) % 43 == 0
-    slow_wave = (row + animation_frame // 2) % 17 == 0 and col % 5 == 0
-    if shimmer:
-        return "bold white on black"
-    if slow_wave:
-        return f"bold {ART_STYLES[(color_index + 1) % len(ART_STYLES)]} on black"
-    return f"{ART_STYLES[color_index]} on black"
-
-
-def _fullscreen_animation_accent(animation_frame: int | None = None) -> str:
-    if animation_frame is None:
-        return "white"
-    accents = ("white", "cyan", "white", "magenta", "white", "blue")
-    return accents[(animation_frame // 8) % len(accents)]
-
-
-def _fullscreen_art_title(label: str, track: TrackInfo | None) -> str:
-    if track and not track.error:
-        parts = [part for part in (track.title.strip(), track.artist.strip(), track.album.strip()) if part]
-        if parts:
-            return f" {label}: {' - '.join(parts[:3])} "
-    return f" {label}: no active album art "
-
-
-def _fullscreen_art_size(screen_width: int, screen_height: int) -> tuple[int, int]:
-    available_width = max(MIN_FULLSCREEN_ART_SIZE[0], screen_width - 4)
-    available_height = max(MIN_FULLSCREEN_ART_SIZE[1], screen_height - 4)
-    height = min(available_height, max(MIN_FULLSCREEN_ART_SIZE[1], available_width // 2))
-    width = min(available_width, max(MIN_FULLSCREEN_ART_SIZE[0], height * 2))
-    return width, height
-
-
-def _muted_speaker_text(title: str, screen_width: int, screen_height: int, error: str = "") -> Text:
-    width = max(1, screen_width)
-    art_width, art_height = _fullscreen_art_size(screen_width, screen_height)
-    speaker_lines = _muted_speaker_lines(art_width, art_height)
-    text = Text(title.center(width), style="bold white on black")
-    text.append("\n")
-    for line in speaker_lines:
-        text.append(line.center(width), style="bold red on black")
-        text.append("\n")
-    message = "No active album art"
-    if error:
-        message = f"Album art unavailable: {_ellipsize(error, max(16, width - 4))}"
-    text.append(message.center(width), style="bold yellow on black")
-    text.append("\n")
-    text.append(" any key returns ".center(width), style="bold cyan on black")
-    return text
-
-
-def _muted_speaker_lines(width: int, height: int) -> tuple[str, ...]:
-    width = max(24, width)
-    height = max(12, height)
-    rows = [[" " for _ in range(width)] for _ in range(height)]
-    center_x = (width - 1) / 2.0
-    center_y = (height - 1) / 2.0
-    radius = min(width / 2.4, height / 2.1)
-
-    for row in range(height):
-        for col in range(width):
-            dx = col - center_x
-            dy = (row - center_y) * 2.0
-            distance = (dx * dx + dy * dy) ** 0.5
-            if abs(distance - radius) < 1.0:
-                rows[row][col] = "O"
-            slash_col = int(center_x + (center_y - row) * (width / max(1, height)) * 0.9)
-            if abs(col - slash_col) <= 1:
-                rows[row][col] = "/"
-
-    box_left = max(1, int(width * 0.28))
-    box_right = max(box_left + 3, int(width * 0.40))
-    box_top = max(1, int(height * 0.38))
-    box_bottom = min(height - 2, int(height * 0.62))
-    cone_tip = min(width - 2, int(width * 0.66))
-    mid = (box_top + box_bottom) // 2
-    for row in range(box_top, box_bottom + 1):
-        for col in range(box_left, box_right + 1):
-            rows[row][col] = "#"
-        spread = abs(row - mid)
-        for col in range(box_right + 1, max(box_right + 2, cone_tip - spread * 2)):
-            if 0 <= col < width:
-                rows[row][col] = "#"
-
-    return tuple("".join(row).rstrip() for row in rows)
-
-
-def _research_lines(
-    artist: str,
-    results: tuple[GenreResult, ...],
-    selected_index: int,
-    artist_scroll: int,
-    focus_artists: bool,
-    *,
-    loading: bool = False,
-    error: str = "",
-) -> list[str]:
-    lines = [
-        f"[ Every Noise Research: {artist} ]",
-        "",
-    ]
-    if loading:
-        return [*lines, "Searching Every Noise and cached Spotify metadata..."]
-    if error:
-        return [*lines, f"Research failed: {error}", "", "R or Esc hides this pane."]
-    if not results:
-        return [*lines, "No genre matches found.", "", "R or Esc hides this pane."]
-
-    selected_index = min(max(0, selected_index), len(results) - 1)
-    selected = results[selected_index]
-    genre_header = "Genres by match" + (" [active]" if not focus_artists else "")
-    artist_header = "Artists in selected genre" + (" [active]" if focus_artists else "")
-    lines.append(f"{genre_header:<42} {artist_header}")
-    lines.append(f"{'-' * 40} {'-' * 43}")
-
-    artists = selected.artists
-    max_artist_scroll = max(0, len(artists) - 20)
-    artist_scroll = min(max(0, artist_scroll), max_artist_scroll)
-    visible_artists = artists[artist_scroll : artist_scroll + 20]
-    row_count = max(10, min(20, max(len(results), len(visible_artists))))
-    for index in range(row_count):
-        if index < len(results):
-            result = results[index]
-            pointer = ">" if index == selected_index and not focus_artists else " "
-            rank = f"#{result.rank}" if result.rank is not None else "--"
-            genre = _ellipsize(result.genre, 22)
-            match = min(999, int(result.score))
-            genre_line = f"{pointer} {genre:<22} {match:>3} {rank:<5}"
-        else:
-            genre_line = ""
-
-        if index < len(visible_artists):
-            artist_pointer = ">" if focus_artists and index == 0 else " "
-            artist_line = f"{artist_pointer} {_ellipsize(visible_artists[index], 39)}"
-        else:
-            artist_line = ""
-        lines.append(f"{genre_line:<42} {artist_line}")
-
-    lines.extend(
-        [
-            "",
-            f"Selected: {selected.genre} via {selected.matched_artist}",
-            "Up/Down moves through genres or artists. Enter switches column. R/Esc hides this pane.",
-        ]
-    )
-    return lines
-
-
-def _volume_text(volumes: tuple[tuple[str, int], ...], track: TrackInfo) -> str:
-    if volumes:
-        if len(volumes) == 1:
-            return f"{volumes[0][1]}%"
-        return ", ".join(f"{speaker} {volume}%" for speaker, volume in volumes)
-    if track.volume is not None:
-        return f"{track.volume}%"
-    return "loading..."
-
-
-def _speaker_row_label(entry: SpeakerEntry, width: int) -> str:
-    if entry.is_group:
-        names = list(entry.members)
-        if len(names) <= 2:
-            label = " + ".join(names)
-        else:
-            label = f"{names[0]} + {names[1]} + {len(names) - 2} more"
-        return _ellipsize(label, width)
-    return _ellipsize(entry.label.strip(), width)
-
-
-def _speaker_state_indicator(entry: SpeakerEntry, entries: list[SpeakerEntry], track_by_speaker: dict[str, TrackInfo]) -> str:
-    if not entry.is_group and _is_group_member(entry, entries):
-        return ""
-    track = _shared_track_for_group(entry, track_by_speaker) if entry.is_group else track_by_speaker.get(entry.speaker or "")
-    return f" ({_playback_state_symbol(track)})"
-
-
-def _playback_state_symbol(track: TrackInfo | None) -> str:
-    if track is None or track.error:
-        return "..."
-    state = (track.playback_state or "").casefold()
-    if state in {"playing", "play"}:
-        return ">"
-    if state in {"paused_playback", "paused", "pause"}:
-        return "||"
-    if state in {"stopped", "stop"}:
-        return "[]"
-    if state:
-        return "?"
-    return "..."
-
-
-def _optimistic_group_label(members: tuple[str, ...]) -> str:
-    if len(members) == 2:
-        return f"{members[0]} + {members[1]} Duet"
-    if len(members) > 2:
-        return f"{', '.join(members[:-1])} + {members[-1]} Ensemble"
-    return members[0] if members else "Pending Group"
-
-
-def _is_group_member(entry: SpeakerEntry, entries: list[SpeakerEntry]) -> bool:
-    if entry.is_group or not entry.speaker:
-        return False
-    return any(group.is_group and entry.speaker in group.members for group in entries)
-
-
-def _ellipsize(text: str, width: int) -> str:
-    if width <= 0:
-        return ""
-    if len(text) <= width:
-        return text
-    if width <= 3:
-        return text[:width]
-    return text[: width - 3].rstrip() + "..."
-
-
-def _elapsed_text(seconds: float) -> str:
-    seconds = max(0, int(seconds))
-    minutes, secs = divmod(seconds, 60)
-    return f"{minutes}:{secs:02d}" if minutes else f"{secs}s"
-
-
-def _track_signature(track: TrackInfo) -> str:
-    return "|".join([track.title.strip(), track.artist.strip(), track.album.strip(), str(track.duration or "")])
-
-
-def _volumes_for(speakers: tuple[str, ...], track_by_speaker: dict[str, TrackInfo]) -> tuple[tuple[str, int], ...]:
-    return tuple(
-        (speaker, track_by_speaker[speaker].volume)
-        for speaker in speakers
-        if speaker in track_by_speaker and track_by_speaker[speaker].volume is not None
-    )
-
-
-def _shared_track_for_group(entry: SpeakerEntry, track_by_speaker: dict[str, TrackInfo]) -> TrackInfo | None:
-    candidates = [entry.coordinator, *entry.members]
-    candidate_tracks = [
-        track_by_speaker[speaker]
-        for speaker in dict.fromkeys(speaker for speaker in candidates if speaker)
-        if speaker in track_by_speaker
-    ]
-    for track in candidate_tracks:
-        if (track.title or track.artist or track.album) and not track.error:
-            return track
-    return candidate_tracks[0] if candidate_tracks else None
-
-
-def _entry_speakers(entry: SpeakerEntry | None) -> tuple[str, ...]:
-    if entry is None:
-        return ()
-    if entry.is_group:
-        return entry.members
-    return (entry.speaker,) if entry.speaker else ()
-
-
-def _entry_tag(entry: SpeakerEntry | None, speaker_tags: dict[str, str]) -> str:
-    speakers = _entry_speakers(entry)
-    tags = [speaker_tags[speaker] for speaker in speakers if speaker in speaker_tags]
-    return tags[0] if tags and all(tag == tags[0] for tag in tags) else ""
-
-
-def _grouping_source(speakers: list[str], entries: list[SpeakerEntry]) -> str:
-    speaker_set = set(speakers)
-    for entry in entries:
-        if entry.is_group and speaker_set.intersection(entry.members):
-            if entry.coordinator and entry.coordinator in entry.members:
-                return entry.coordinator
-            return entry.members[0]
-    return speakers[0]
-
-
-def _expand_existing_group_members(speakers: tuple[str, ...], entries: list[SpeakerEntry]) -> tuple[str, ...]:
-    output: list[str] = []
-    speaker_set = set(speakers)
-    for entry in entries:
-        if entry.is_group and speaker_set.intersection(entry.members):
-            for member in entry.members:
-                if member not in output:
-                    output.append(member)
-    for speaker in speakers:
-        if speaker not in output:
-            output.append(speaker)
-    return tuple(output)

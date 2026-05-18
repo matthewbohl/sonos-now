@@ -1,0 +1,88 @@
+Screen {
+    background: #001b4d;
+    color: white;
+}
+
+#layout {
+    height: 1fr;
+}
+
+#speaker-pane {
+    width: 34;
+    border: solid cyan;
+    background: #002b6f;
+}
+
+#detail-pane {
+    width: 1fr;
+    border: solid cyan;
+    background: #00245f;
+}
+
+.pane-title {
+    background: cyan;
+    color: black;
+    text-style: bold;
+    padding: 0 1;
+}
+
+#speakers {
+    height: 1fr;
+    padding: 0 1;
+}
+
+#details {
+    height: 1fr;
+    overflow-y: auto;
+    padding: 1 2;
+}
+
+#status {
+    dock: bottom;
+    height: 1;
+    background: black;
+    color: cyan;
+    text-style: bold;
+}
+
+HelpScreen {
+    align: center middle;
+    background: $background 70%;
+}
+
+#help-modal {
+    width: 68;
+    height: auto;
+    border: thick cyan;
+    background: black;
+    color: white;
+    padding: 1 2;
+}
+
+#debug-title, #research-title {
+    display: none;
+    background: cyan;
+    color: black;
+    text-style: bold;
+    padding: 0 1;
+}
+
+#research-title {
+    background: magenta;
+    color: black;
+}
+
+#debug-pane, #research-pane {
+    display: none;
+    height: 33%;
+    min-height: 6;
+    border-top: solid cyan;
+    background: black;
+    color: white;
+    overflow-y: auto;
+    padding: 0 1;
+}
+
+#research-pane {
+    border-top: solid magenta;
+}

@@ -8,7 +8,7 @@ This project was developed as a terminal-native Sonos dashboard and control surf
 - Console command: `sonos-now`
 - UI framework: Textual
 - Sonos backend: direct SoCo calls, no `soco-cli`
-- Tests: lightweight pytest-compatible assertions in `tests/test_backend.py`
+- Tests: lightweight pytest-compatible assertions in `tests/`
 
 ## Important Behavioral Contracts
 
@@ -23,11 +23,14 @@ This project was developed as a terminal-native Sonos dashboard and control surf
 
 ## Files To Start With
 
-- `src/sonos_now/app.py`: Textual layout, key handling, optimistic UI, debug pane.
+- `src/sonos_now/app.py`: Textual layout, key handling, optimistic UI, debug and research panes.
+- `src/sonos_now/rendering.py`: pure display helpers for rows, details, album-art text, and research text.
+- `src/sonos_now/grouping.py`: pure grouping helpers for labels, selected entries, shared tracks, and volumes.
+- `src/sonos_now/art_manager.py`: lazy album-art fetch/conversion caches for full, compact, and fullscreen art.
 - `src/sonos_now/soco_backend.py`: SoCo discovery, metadata, grouping, controls, safe unjoin logic.
 - `src/sonos_now/visualizer.py`: independent visualizer engines and hidden festival scene.
-- `src/sonos_now/everynoise.py`: lazy similar-artist cache.
-- `tests/test_backend.py`: fast regression coverage without real Sonos hardware.
+- `src/sonos_now/everynoise.py`: lazy similar-artist cache with per-entry cache timestamps.
+- `tests/`: fast regression coverage without real Sonos hardware.
 
 ## Verification
 
@@ -48,4 +51,3 @@ PYTHONPATH=src python -c "import tests.test_backend as t; [getattr(t, name)() fo
 ## Design Taste
 
 Keep the app terminal-native, dense, and keyboard-driven. Prefer useful status and non-blocking background work over modal flows. The visualizer is allowed to be playful and colorful; the control surface should remain readable and predictable.
-

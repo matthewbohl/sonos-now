@@ -52,3 +52,4 @@ class SpeakerEntry:
 class SonosSnapshot:
     entries: tuple[SpeakerEntry, ...]
     tracks: tuple[TrackInfo, ...]
+    warnings: tuple[str, ...] = ()

@@ -14,7 +14,7 @@ import requests
 EVERY_NOISE_BASE = "https://everynoise.com"
 SPOTIFY_BASE = "https://api.spotify.com/v1"
 DEFAULT_CACHE_TTL_SECONDS = 3 * 24 * 60 * 60
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -50,6 +50,12 @@ class EveryNoiseClient:
         self._artist_genre_cache: dict[str, tuple[str, ...]] = {}
         self._genre_artist_cache: dict[str, tuple[dict[str, Any], ...]] = {}
         self._similar_artist_cache: dict[str, tuple[str, ...]] = {}
+        self._cache_timestamps: dict[str, dict[str, float]] = {
+            "artist_search_cache": {},
+            "artist_genre_cache": {},
+            "genre_artist_cache": {},
+            "similar_artist_cache": {},
+        }
         self._load_cache()
 
     def search_artist_genres(self, artist: str, limit: int = 8) -> tuple[GenreResult, ...]:
@@ -117,6 +123,7 @@ class EveryNoiseClient:
             for name, _score in sorted(scored.items(), key=lambda item: (-item[1], item[0].casefold()))
         )
         self._similar_artist_cache[key] = similar
+        self._touch_cache_key("similar_artist_cache", key)
         self._save_cache()
         return similar[:limit]
 
@@ -133,6 +140,7 @@ class EveryNoiseClient:
         payload = response.json()
         artists = tuple(payload.get(genre, payload.get(genre.lstrip("*"), ())) or ())
         self._genre_artist_cache[key] = artists
+        self._touch_cache_key("genre_artist_cache", key)
         self._save_cache()
         return artists
 
@@ -150,6 +158,7 @@ class EveryNoiseClient:
         response.raise_for_status()
         artists = list(response.json().get("artists", {}).get("items", ()))
         self._artist_search_cache[key] = artists
+        self._touch_cache_key("artist_search_cache", key)
         self._save_cache()
         return artists
 
@@ -164,6 +173,7 @@ class EveryNoiseClient:
         response.raise_for_status()
         genres = tuple(str(genre) for genre in response.json().get(artist_id, ()) if genre)
         self._artist_genre_cache[artist_id] = genres
+        self._touch_cache_key("artist_genre_cache", artist_id)
         self._save_cache()
         return genres
 
@@ -187,11 +197,38 @@ class EveryNoiseClient:
             payload = json.loads(self.cache_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return
-        if payload.get("schema_version") != SCHEMA_VERSION:
+        schema_version = payload.get("schema_version")
+        if schema_version == 1:
+            self._load_legacy_cache(payload)
             return
-        if time.time() - float(payload.get("written_at") or 0) > self.cache_ttl_seconds:
+        if schema_version != SCHEMA_VERSION:
             return
 
+        self._artist_search_cache = self._load_timed_cache(
+            payload,
+            "artist_search_cache",
+            lambda value: list(value),
+        )
+        self._artist_genre_cache = self._load_timed_cache(
+            payload,
+            "artist_genre_cache",
+            lambda value: tuple(str(item) for item in value),
+        )
+        self._genre_artist_cache = self._load_timed_cache(
+            payload,
+            "genre_artist_cache",
+            lambda value: tuple(dict(item) for item in value),
+        )
+        self._similar_artist_cache = self._load_timed_cache(
+            payload,
+            "similar_artist_cache",
+            lambda value: tuple(str(item) for item in value),
+        )
+
+    def _load_legacy_cache(self, payload: dict[str, Any]) -> None:
+        written_at = float(payload.get("written_at") or 0)
+        if time.time() - written_at > self.cache_ttl_seconds:
+            return
         self._artist_search_cache = {
             str(key): list(value)
             for key, value in dict(payload.get("artist_search_cache") or {}).items()
@@ -208,15 +245,37 @@ class EveryNoiseClient:
             str(key): tuple(str(item) for item in value)
             for key, value in dict(payload.get("similar_artist_cache") or {}).items()
         }
+        for cache_name, cache in (
+            ("artist_search_cache", self._artist_search_cache),
+            ("artist_genre_cache", self._artist_genre_cache),
+            ("genre_artist_cache", self._genre_artist_cache),
+            ("similar_artist_cache", self._similar_artist_cache),
+        ):
+            self._cache_timestamps[cache_name] = {key: written_at for key in cache}
+
+    def _load_timed_cache(self, payload: dict[str, Any], cache_name: str, convert) -> dict[str, Any]:
+        now = time.time()
+        output: dict[str, Any] = {}
+        timestamps: dict[str, float] = {}
+        raw_cache = dict(payload.get(cache_name) or {})
+        for raw_key, raw_entry in raw_cache.items():
+            key = str(raw_key)
+            entry = dict(raw_entry or {})
+            written_at = float(entry.get("written_at") or 0)
+            if now - written_at > self.cache_ttl_seconds:
+                continue
+            output[key] = convert(entry.get("value"))
+            timestamps[key] = written_at
+        self._cache_timestamps[cache_name] = timestamps
+        return output
 
     def _save_cache(self) -> None:
         payload = {
             "schema_version": SCHEMA_VERSION,
-            "written_at": time.time(),
-            "artist_search_cache": self._artist_search_cache,
-            "artist_genre_cache": self._artist_genre_cache,
-            "genre_artist_cache": self._genre_artist_cache,
-            "similar_artist_cache": self._similar_artist_cache,
+            "artist_search_cache": self._timed_cache_payload("artist_search_cache", self._artist_search_cache),
+            "artist_genre_cache": self._timed_cache_payload("artist_genre_cache", self._artist_genre_cache),
+            "genre_artist_cache": self._timed_cache_payload("genre_artist_cache", self._genre_artist_cache),
+            "similar_artist_cache": self._timed_cache_payload("similar_artist_cache", self._similar_artist_cache),
         }
         try:
             self.cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -225,6 +284,20 @@ class EveryNoiseClient:
             tmp_path.replace(self.cache_path)
         except OSError:
             return
+
+    def _timed_cache_payload(self, cache_name: str, cache: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        timestamps = self._cache_timestamps.setdefault(cache_name, {})
+        now = time.time()
+        return {
+            key: {
+                "written_at": timestamps.setdefault(key, now),
+                "value": value,
+            }
+            for key, value in cache.items()
+        }
+
+    def _touch_cache_key(self, cache_name: str, key: str) -> None:
+        self._cache_timestamps.setdefault(cache_name, {})[key] = time.time()
 
 
 def _artist_match_score(query: str, candidate: str) -> float:

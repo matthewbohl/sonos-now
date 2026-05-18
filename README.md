@@ -108,7 +108,11 @@ The bottom status line reports user commands currently being sent and how long t
 The project is intentionally split into small pieces:
 
 - `soco_backend.py`: direct SoCo discovery, grouping, metadata, volume, and controls
-- `app.py`: Textual UI, keyboard bindings, and album-art rendering
+- `app.py`: Textual UI, keyboard handling, background workers, and status panes
+- `rendering.py`: pure Rich/Textual rendering helpers for track details, speaker rows, research output, and album art
+- `grouping.py`: pure grouping and row-selection helpers shared by the UI tests
+- `art_manager.py`: lazy album-art fetch, conversion, and full/compact/fullscreen caches
+- `state.py`: small UI state dataclasses
 - `visualizer.py`: fullscreen Textual visualizer engines and palettes
 - `models.py`: plain dataclasses shared by UI and backend
 - `ascii_art.py`: colorized album-art conversion

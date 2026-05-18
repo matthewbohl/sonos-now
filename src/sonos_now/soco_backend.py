@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from typing import Iterable
 from urllib.parse import urljoin
@@ -29,12 +30,26 @@ class SonosService:
         self.discovery_timeout = discovery_timeout
         self.group_join_delay = group_join_delay
         self._devices_by_name: dict[str, object] = {}
+        self._warnings: list[str] = []
+
+    @property
+    def warnings(self) -> tuple[str, ...]:
+        return tuple(self._warnings)
 
     def snapshot(self) -> SonosSnapshot:
+        entries = self.refresh_topology()
+        tracks = self.tracks_for_entries(entries)
+        return SonosSnapshot(entries=tuple(entries), tracks=tuple(tracks), warnings=tuple(self._warnings))
+
+    def refresh_topology(self) -> tuple[SpeakerEntry, ...]:
+        self._warnings = []
         devices = self._devices()
-        entries = self._entries_for_devices(devices)
-        tracks = self._tracks_for_entries(entries)
-        return SonosSnapshot(entries=tuple(entries), tracks=tuple(tracks))
+        return tuple(self._entries_for_devices(devices))
+
+    def tracks_for_entries(self, entries: Iterable[SpeakerEntry]) -> tuple[TrackInfo, ...]:
+        if not self._devices_by_name:
+            self._devices()
+        return tuple(self._tracks_for_entries(list(entries)))
 
     def play_pause(self, entry: SpeakerEntry) -> None:
         device = self._device_for_control(entry, group_action=True)
@@ -140,12 +155,14 @@ class SonosService:
                     scan_timeout=max(0.1, min(self.discovery_timeout, 2.0)),
                     networks_to_scan=list(self.subnets),
                 ) or set()
-            except Exception:
+            except Exception as exc:
+                self._warnings.append(f"Subnet discovery failed: {exc}")
                 return set()
 
         try:
             return soco.discovery.discover(timeout=self.discovery_timeout) or set()
-        except Exception:
+        except Exception as exc:
+            self._warnings.append(f"Discovery failed: {exc}")
             return set()
 
     def _entries_for_devices(self, devices: list[object]) -> list[SpeakerEntry]:
@@ -187,18 +204,43 @@ class SonosService:
         return entries
 
     def _tracks_for_entries(self, entries: list[SpeakerEntry]) -> list[TrackInfo]:
+        fetch_speakers: list[str] = []
+        for entry in entries:
+            if entry.is_group:
+                coordinator = entry.coordinator if entry.coordinator in entry.members else entry.members[0]
+                if coordinator not in fetch_speakers:
+                    fetch_speakers.append(coordinator)
+            elif entry.speaker and entry.speaker not in fetch_speakers:
+                fetch_speakers.append(entry.speaker)
+
+        fetched = self._fetch_tracks(fetch_speakers)
         tracks_by_speaker: dict[str, TrackInfo] = {}
         for entry in entries:
             if entry.is_group:
                 coordinator = entry.coordinator if entry.coordinator in entry.members else entry.members[0]
-                base_track = self._track_for_speaker(coordinator)
+                base_track = fetched.get(coordinator, TrackInfo(speaker=coordinator, error="Speaker not discovered"))
                 for member in entry.members:
                     volume = _safe_volume(self._devices_by_name.get(member))
                     tracks_by_speaker[member] = replace(base_track, speaker=member, volume=volume)
             elif entry.speaker and entry.speaker not in tracks_by_speaker:
-                tracks_by_speaker[entry.speaker] = self._track_for_speaker(entry.speaker)
+                tracks_by_speaker[entry.speaker] = fetched.get(entry.speaker, TrackInfo(speaker=entry.speaker, error="Speaker not discovered"))
 
         return [tracks_by_speaker[speaker] for speaker in dict.fromkeys(entry.speaker for entry in entries if entry.speaker) if speaker]
+
+    def _fetch_tracks(self, speakers: list[str]) -> dict[str, TrackInfo]:
+        if not speakers:
+            return {}
+        max_workers = max(1, min(8, len(speakers)))
+        results: dict[str, TrackInfo] = {}
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="sonos-track") as executor:
+            futures = {executor.submit(self._track_for_speaker, speaker): speaker for speaker in speakers}
+            for future in as_completed(futures):
+                speaker = futures[future]
+                try:
+                    results[speaker] = future.result()
+                except Exception as exc:
+                    results[speaker] = TrackInfo(speaker=speaker, error=str(exc))
+        return results
 
     def _track_for_speaker(self, speaker: str) -> TrackInfo:
         device = self._devices_by_name.get(speaker)
